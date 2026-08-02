@@ -1,0 +1,178 @@
+name: Package macOS release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to package
+        required: true
+        type: string
+      package_mode:
+        description: Development is CI-only; release creates a signed draft after manual review.
+        required: true
+        default: development
+        type: choice
+        options:
+          - development
+          - release
+
+permissions:
+  contents: read
+
+env:
+  OBS_VERSION: 32.1.1
+  TELEGRAM_BOT_API_REVISION: adfd7f6a8e990272851777eeb3ae0def4216f161
+
+jobs:
+  package:
+    name: Package (${{ github.event_name == 'workflow_dispatch' && inputs.package_mode || 'development' }})
+    runs-on: macos-14
+    outputs:
+      mode: ${{ steps.mode.outputs.value }}
+      tag: ${{ steps.mode.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - id: mode
+        name: Select package mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          mode='development'
+          tag="${GITHUB_REF_NAME}"
+          if [[ "${{ github.event_name }}" == 'workflow_dispatch' ]]; then
+            mode='${{ inputs.package_mode }}'
+            tag='${{ inputs.tag }}'
+          fi
+          [[ "$tag" =~ ^v.+ ]] || { printf '%s\n' 'Only v* tags may be packaged.' >&2; exit 64; }
+          printf 'value=%s\n' "$mode" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Install build tools
+        run: brew install cmake ninja gperf openssl@3
+
+      - name: Download OBS Studio 32.1.1 for Apple Silicon
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/obsproject/obs-studio/releases/download/${OBS_VERSION}/OBS-Studio-${OBS_VERSION}-macOS-Apple.dmg" \
+            --output "$RUNNER_TEMP/obs.dmg"
+          hdiutil attach "$RUNNER_TEMP/obs.dmg" -readonly -nobrowse -mountpoint "$RUNNER_TEMP/obs-mount"
+          cp -R "$RUNNER_TEMP/obs-mount/OBS.app" "$RUNNER_TEMP/OBS.app"
+          hdiutil detach "$RUNNER_TEMP/obs-mount"
+
+      - name: Fetch OBS 32.1.1 headers
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/obsproject/obs-studio.git "$RUNNER_TEMP/obs-source"
+          git -C "$RUNNER_TEMP/obs-source" checkout --detach 7272af1375b38bc3cf4e0f98a5d999e8b76e9309
+
+      - name: Build OBS plugin and local agent
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path agent/Cargo.toml
+          cargo build --manifest-path agent/Cargo.toml --release
+          cmake -S . -B build -G Ninja \
+            -DOBS_APP_BUNDLE="$RUNNER_TEMP/OBS.app" \
+            -DOBS_INCLUDE_DIR="$RUNNER_TEMP/obs-source/libobs" \
+            -DCMAKE_OSX_ARCHITECTURES=arm64
+          cmake --build build --config Release
+          ctest --test-dir build --output-on-failure
+
+      - name: Build pinned official Telegram Bot API server
+        run: |
+          set -euo pipefail
+          git clone --recurse-submodules https://github.com/tdlib/telegram-bot-api.git "$RUNNER_TEMP/telegram-bot-api"
+          git -C "$RUNNER_TEMP/telegram-bot-api" checkout --detach "$TELEGRAM_BOT_API_REVISION"
+          git -C "$RUNNER_TEMP/telegram-bot-api" submodule update --init --recursive
+          cmake -S "$RUNNER_TEMP/telegram-bot-api" -B "$RUNNER_TEMP/telegram-bot-api/build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix openssl@3)"
+          cmake --build "$RUNNER_TEMP/telegram-bot-api/build" --target telegram-bot-api
+
+      - name: Install protected signing keychain
+        if: steps.mode.outputs.value == 'release'
+        env:
+          OBS_TELEGRAM_SIGNING_KEYCHAIN_BASE64: ${{ secrets.OBS_TELEGRAM_SIGNING_KEYCHAIN_BASE64 }}
+          OBS_TELEGRAM_SIGNING_KEYCHAIN_PASSWORD: ${{ secrets.OBS_TELEGRAM_SIGNING_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "$OBS_TELEGRAM_SIGNING_KEYCHAIN_BASE64" && -n "$OBS_TELEGRAM_SIGNING_KEYCHAIN_PASSWORD" ]] || {
+            printf '%s\n' 'Release requires the protected signing keychain secrets.' >&2
+            exit 78
+          }
+          keychain="$RUNNER_TEMP/obs-telegram-signing.keychain-db"
+          printf '%s' "$OBS_TELEGRAM_SIGNING_KEYCHAIN_BASE64" | base64 --decode > "$keychain"
+          security unlock-keychain -p "$OBS_TELEGRAM_SIGNING_KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+
+      - name: Build package
+        env:
+          OBS_TELEGRAM_DEVELOPER_ID_APPLICATION: ${{ secrets.OBS_TELEGRAM_DEVELOPER_ID_APPLICATION }}
+          OBS_TELEGRAM_DEVELOPER_ID_INSTALLER: ${{ secrets.OBS_TELEGRAM_DEVELOPER_ID_INSTALLER }}
+          OBS_TELEGRAM_NOTARY_PROFILE: ${{ secrets.OBS_TELEGRAM_NOTARY_PROFILE }}
+        run: |
+          set -euo pipefail
+          mode='${{ steps.mode.outputs.value }}'
+          bash installer/macos/build-package.sh "--${mode}" \
+            --plugin "$GITHUB_WORKSPACE/build/plugin/obs-telegram-send.plugin" \
+            --agent "$GITHUB_WORKSPACE/agent/target/release/obs-telegram-agent" \
+            --telegram-bot-api "$RUNNER_TEMP/telegram-bot-api/build/telegram-bot-api"
+          bash scripts/verify-release.sh "--${mode}"
+
+      - name: Upload development-only package
+        if: steps.mode.outputs.value == 'development'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: OBS-Telegram-Send-macOS-development-${{ steps.mode.outputs.tag }}
+          path: dist/OBS-Telegram-Send-macOS-development.pkg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload release candidate package
+        if: steps.mode.outputs.value == 'release'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: OBS-Telegram-Send-macOS-release-candidate-${{ steps.mode.outputs.tag }}
+          path: dist/OBS-Telegram-Send-macOS.pkg
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-draft:
+    name: Create signed draft release
+    needs: package
+    if: needs.package.outputs.mode == 'release'
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: OBS-Telegram-Send-macOS-release-candidate-${{ needs.package.outputs.tag }}
+          path: dist
+
+      - name: Create or update draft only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.package.outputs.tag }}
+        run: |
+          set -euo pipefail
+          package='dist/OBS-Telegram-Send-macOS.pkg'
+          test -f "$package"
+          notes='Signed and notarized macOS release candidate. Keep this GitHub Release as a draft until it has been manually installed and verified in a clean macOS account.'
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" == 'true' ]] || {
+              printf '%s\n' 'Refusing to upload a release package to a non-draft GitHub Release.' >&2
+              exit 1
+            }
+            gh release upload "$TAG" "$package" --clobber
+          else
+            gh release create "$TAG" "$package" --draft --title "$TAG" --notes "$notes"
+          fi
