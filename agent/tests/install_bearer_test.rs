@@ -2,6 +2,7 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -51,6 +52,32 @@ fn install_bearer_store_uses_owner_only_directory_and_file_permissions() {
     assert_eq!(stored_value.len(), 64);
     assert!(!stored_value.contains("bot_token"));
     assert!(!stored_value.contains("api_hash"));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn reader_retries_until_a_concurrently_written_bearer_is_complete() {
+    let directory = temporary_app_support_directory();
+    let store = InstallBearerStore::at(directory.clone());
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(store.path(), "").unwrap();
+    fs::set_permissions(store.path(), fs::Permissions::from_mode(0o600)).unwrap();
+
+    let path = store.path();
+    let expected = "a".repeat(64);
+    let writer = thread::spawn({
+        let expected = expected.clone();
+        move || {
+            thread::sleep(std::time::Duration::from_millis(20));
+            fs::write(path, expected).unwrap();
+        }
+    });
+
+    let bearer = store.load_or_create().unwrap();
+    writer.join().unwrap();
+    assert_eq!(bearer.expose_secret(), expected);
 
     fs::remove_dir_all(directory).unwrap();
 }
