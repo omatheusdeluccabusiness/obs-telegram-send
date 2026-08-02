@@ -24,6 +24,10 @@
 - O agente usa por padrão o caminho empacotado do servidor local, e só aceita
   `OBS_TELEGRAM_BOT_API_PATH` como override explícito de desenvolvimento; ele
   não busca `telegram-bot-api` no `PATH`.
+- O servidor local não herda mais o cwd `/` do LaunchAgent para estado. O
+  agente cria `telegram-bot-api/` e `telegram-bot-api/temp/` sob o Application
+  Support do usuário, aplica `0700`, passa `--dir` e `--temp-dir` ao child e
+  também define cwd para a pasta privada como defesa adicional.
 - Antes de qualquer inicialização do Bot API local (onboarding, configuração
   salva ou relançamento), o agente chama `logOut` na API cloud do Telegram. O
   teste usa uma API cloud fake em loopback e não faz chamada real.
@@ -74,6 +78,11 @@
     development avisa e release falha. Ele também confirma por ordem que o gate
     unsigned ocorre entre pkgbuild e productsign, e que a publicação final só
     ocorre depois das validações do pacote assinado.
+11. TDD do runtime: os testes inicialmente falharam porque
+    `prepare_directories_at` e os argumentos de diretório não existiam. Depois
+    passaram confirmando paths exatos, criação e permissões `0700`, além de
+    `--dir`/`--temp-dir` explícitos. O agente release foi recompilado antes do
+    pacote development.
 
 ## Self-review e preocupações reais
 

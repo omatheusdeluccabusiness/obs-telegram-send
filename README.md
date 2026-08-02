@@ -15,6 +15,10 @@ O agente escuta apenas em `127.0.0.1`. No primeiro início ele cria um bearer
 local aleatório em `~/Library/Application Support/OBS-Telegram-Send/`, com
 permissão de usuário; o pacote não contém tokens, `api_id`, `api_hash` nem
 caminhos de gravações. A configuração do Telegram fica no Keychain do macOS.
+Os dados operacionais do servidor oficial ficam em
+`~/Library/Application Support/OBS-Telegram-Send/telegram-bot-api/` e sua pasta
+`temp/`, ambas privadas (`0700`); o agente passa esses caminhos explicitamente
+ao processo e não depende do diretório atual do LaunchAgent.
 O servidor oficial só é iniciado depois de uma ação explícita do assistente de
 configuração. Antes de iniciar o servidor local, o agente chama `logOut` na API
 cloud do Telegram, como exigido pelo Telegram para que o `/start` possa ser

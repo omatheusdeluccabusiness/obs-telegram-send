@@ -1,11 +1,14 @@
 use std::{
+    fs,
     net::{Ipv4Addr, SocketAddr, TcpStream},
-    path::PathBuf,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
     process::{Child, Command},
     time::Duration,
 };
 
 use async_trait::async_trait;
+use directories_next::BaseDirs;
 use reqwest::{
     multipart::{Form, Part},
     Client,
@@ -17,6 +20,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::{
     config::{TelegramConfig, TelegramCredentials},
+    install_bearer::APP_SUPPORT_DIRECTORY_NAME,
     jobs::MAX_FILE_SIZE_BYTES,
     keychain::SecretStore,
 };
@@ -278,9 +282,47 @@ pub struct LocalBotApiServer {
     port: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BotApiDirectories {
+    data: PathBuf,
+    temporary: PathBuf,
+}
+
+impl BotApiDirectories {
+    pub fn data_dir(&self) -> &Path {
+        &self.data
+    }
+
+    pub fn temp_dir(&self) -> &Path {
+        &self.temporary
+    }
+}
+
 impl LocalBotApiServer {
     pub fn packaged_executable_path() -> PathBuf {
         PathBuf::from(PACKAGED_BOT_API_PATH)
+    }
+
+    pub fn prepare_directories_at(
+        application_support: &Path,
+    ) -> Result<BotApiDirectories, TelegramError> {
+        let data = application_support.join("telegram-bot-api");
+        let temporary = data.join("temp");
+        fs::create_dir_all(&temporary).map_err(|_| TelegramError::RequestFailed)?;
+        for directory in [application_support, data.as_path(), temporary.as_path()] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+                .map_err(|_| TelegramError::RequestFailed)?;
+        }
+        Ok(BotApiDirectories { data, temporary })
+    }
+
+    fn prepare_user_directories() -> Result<BotApiDirectories, TelegramError> {
+        let base_directories = BaseDirs::new().ok_or(TelegramError::RequestFailed)?;
+        Self::prepare_directories_at(
+            &base_directories
+                .data_local_dir()
+                .join(APP_SUPPORT_DIRECTORY_NAME),
+        )
     }
 
     pub fn start(config: &TelegramConfig, port: u16) -> Result<Self, TelegramError> {
@@ -336,10 +378,12 @@ impl LocalBotApiServer {
         let executable = std::env::var_os("OBS_TELEGRAM_BOT_API_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(Self::packaged_executable_path);
+        let directories = Self::prepare_user_directories()?;
         let child = Command::new(executable)
-            .args(Self::command_arguments(port))
+            .args(Self::command_arguments(port, &directories))
             .env("TELEGRAM_API_ID", api_id.to_string())
             .env("TELEGRAM_API_HASH", api_hash)
+            .current_dir(directories.data_dir())
             .spawn()
             .map_err(|_| TelegramError::RequestFailed)?;
         let mut server = Self { child, port };
@@ -347,13 +391,17 @@ impl LocalBotApiServer {
         Ok(server)
     }
 
-    pub fn command_arguments(port: u16) -> Vec<String> {
+    pub fn command_arguments(port: u16, directories: &BotApiDirectories) -> Vec<String> {
         vec![
             "--local".to_owned(),
             "--http-ip-address".to_owned(),
             "127.0.0.1".to_owned(),
             "--http-port".to_owned(),
             port.to_string(),
+            "--dir".to_owned(),
+            directories.data_dir().to_string_lossy().into_owned(),
+            "--temp-dir".to_owned(),
+            directories.temp_dir().to_string_lossy().into_owned(),
         ]
     }
 

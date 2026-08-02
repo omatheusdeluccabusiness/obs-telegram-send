@@ -48,6 +48,11 @@ lugares ao mesmo tempo.
 
 Nunca envie token, `api_hash` ou uma captura desses campos ao pedir ajuda.
 
+O servidor local grava somente em
+`~/Library/Application Support/OBS-Telegram-Send/telegram-bot-api/` e em sua
+pasta `temp/`. Essas pastas pertencem ao usuário da sessão e têm permissão
+privada; ele não tenta criar arquivos em `/` nem usa a pasta do usuário root.
+
 ## O arquivo é maior que 2 GiB
 
 O produto recusa o arquivo antes de iniciar o upload. Grave com bitrate/duração

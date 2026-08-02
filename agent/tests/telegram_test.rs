@@ -9,6 +9,7 @@ use obs_telegram_agent::{
     telegram::{migrate_bot_to_local, LocalBotApiServer, TelegramGateway},
 };
 use serde_json::{json, Value};
+use std::os::unix::fs::PermissionsExt;
 use tokio::net::TcpListener;
 
 async fn fake_updates() -> Json<Value> {
@@ -68,7 +69,10 @@ async fn fake_local_endpoint_receives_video_for_mp4_and_document_for_other_files
 
 #[test]
 fn local_bot_api_arguments_force_an_isolated_loopback_listener() {
-    let arguments = LocalBotApiServer::command_arguments(41723);
+    let application_support = tempfile::tempdir().unwrap();
+    let directories =
+        LocalBotApiServer::prepare_directories_at(application_support.path()).unwrap();
+    let arguments = LocalBotApiServer::command_arguments(41723, &directories);
 
     assert!(arguments
         .windows(2)
@@ -76,6 +80,40 @@ fn local_bot_api_arguments_force_an_isolated_loopback_listener() {
     assert!(arguments
         .windows(2)
         .any(|pair| pair == ["--http-port", "41723"]));
+    assert!(arguments
+        .windows(2)
+        .any(|pair| { pair[0] == "--dir" && pair[1] == directories.data_dir().to_string_lossy() }));
+    assert!(arguments.windows(2).any(|pair| {
+        pair[0] == "--temp-dir" && pair[1] == directories.temp_dir().to_string_lossy()
+    }));
+}
+
+#[test]
+fn local_bot_api_directories_are_private_and_user_writable() {
+    let temporary_root = tempfile::tempdir().unwrap();
+    let application_support = temporary_root.path().join("OBS-Telegram-Send");
+
+    let directories = LocalBotApiServer::prepare_directories_at(&application_support).unwrap();
+
+    assert_eq!(
+        directories.data_dir(),
+        application_support.join("telegram-bot-api")
+    );
+    assert_eq!(
+        directories.temp_dir(),
+        application_support.join("telegram-bot-api/temp")
+    );
+    for directory in [
+        application_support.as_path(),
+        directories.data_dir(),
+        directories.temp_dir(),
+    ] {
+        assert!(directory.is_dir());
+        assert_eq!(
+            std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
 }
 
 #[test]
