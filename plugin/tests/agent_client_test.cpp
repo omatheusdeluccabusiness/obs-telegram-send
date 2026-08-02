@@ -191,7 +191,8 @@ TEST(AgentClient, RealLoopbackTransportPreservesRouteAuthBodyAndDecodesTransient
 
 	ASSERT_EQ(server.requests().size(), 3U);
 	EXPECT_TRUE(server.requests()[0].startsWith("POST /v1/jobs HTTP/1.1\r\n"));
-	EXPECT_TRUE(server.requests()[0].toLower().contains("authorization: bearer loopback-secret\r\n"));
+	for (const auto &request : server.requests())
+		EXPECT_TRUE(request.toLower().contains("authorization: bearer loopback-secret\r\n"));
 	const auto first_body = server.requests()[0].mid(server.requests()[0].indexOf("\r\n\r\n") + 4);
 	const auto payload = QJsonDocument::fromJson(first_body).object();
 	EXPECT_EQ(payload.value(QStringLiteral("recording_path")).toString(), QStringLiteral("/recordings/take.mp4"));
