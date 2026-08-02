@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -u
+
+label='com.obs-telegram-send.agent'
+launch_agent="/Library/LaunchAgents/$label.plist"
+dry_run="${OBS_TELEGRAM_POSTINSTALL_DRY_RUN:-0}"
+
+log_message() {
+  if [[ "$dry_run" == '1' ]]; then
+    printf 'logger %s\n' "$*" >> "${OBS_TELEGRAM_POSTINSTALL_LOG:?}"
+  else
+    /usr/bin/logger -t "$label" -- "$*"
+  fi
+}
+
+launchctl_command() {
+  if [[ "$dry_run" == '1' ]]; then
+    printf '%s\n' "$*" >> "${OBS_TELEGRAM_POSTINSTALL_LOG:?}"
+    return 0
+  fi
+  /bin/launchctl "$@"
+}
+
+if [[ "$dry_run" == '1' ]]; then
+  console_user="${OBS_TELEGRAM_TEST_CONSOLE_USER:-matheus}"
+  console_uid="${OBS_TELEGRAM_TEST_CONSOLE_UID:-501}"
+else
+  console_user="$(/usr/bin/stat -f '%Su' /dev/console)"
+  console_uid="$(/usr/bin/id -u "$console_user" 2>/dev/null || true)"
+fi
+
+if [[ "$console_user" == 'root' || "$console_user" == 'loginwindow' || -z "$console_user" ]]; then
+  log_message 'Nenhum usuário gráfico ativo; o OBS Telegram Send iniciará no próximo login.'
+  exit 0
+fi
+
+if [[ -z "$console_uid" || ! "$console_uid" =~ ^[0-9]+$ ]]; then
+  log_message 'Não foi possível determinar o UID da sessão; o OBS Telegram Send iniciará no próximo login.'
+  exit 0
+fi
+
+# An old registration is harmless. Remove it before bootstrap so reinstalling is
+# idempotent; launchctl returns nonzero if it was never loaded.
+if [[ "$dry_run" == '1' ]]; then
+  launchctl_command bootout "gui/$console_uid" "$launch_agent" || true
+else
+  launchctl_command bootout "gui/$console_uid" "$launch_agent" >/dev/null 2>&1 || true
+fi
+if launchctl_command bootstrap "gui/$console_uid" "$launch_agent"; then
+  launchctl_command kickstart -k "gui/$console_uid/$label" || \
+    log_message 'O agente foi registrado, mas não pôde iniciar agora; encerre e entre novamente no macOS.'
+else
+  log_message 'O agente foi instalado, mas não pôde iniciar nesta sessão; encerre e entre novamente no macOS.'
+fi
+
+exit 0

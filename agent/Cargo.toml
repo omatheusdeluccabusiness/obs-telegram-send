@@ -1,0 +1,27 @@
+[package]
+name = "obs-telegram-agent"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "obs-telegram-agent"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+async-trait = "0.1"
+directories-next = "2"
+keyring = { version = "3", features = ["apple-native"] }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
