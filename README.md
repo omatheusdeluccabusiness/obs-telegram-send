@@ -17,7 +17,9 @@ Run the test suite and configure the native target:
 
 ```sh
 cargo test --manifest-path agent/Cargo.toml
-cmake -S . -B build -DOBS_APP_BUNDLE=/Applications/OBS.app
+cmake -S . -B build \
+  -DOBS_APP_BUNDLE=/Applications/OBS.app \
+  -DOBS_INCLUDE_DIR=/path/to/obs-32.1.1-headers
 ```
 
 The local agent exposes `GET /health`, which returns protocol version `0.1.0`
