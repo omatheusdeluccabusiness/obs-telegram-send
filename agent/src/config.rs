@@ -1,4 +1,5 @@
 use secrecy::SecretString;
+use serde::Deserialize;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConfigError {
@@ -6,6 +7,7 @@ pub enum ConfigError {
     InvalidTelegramApp,
 }
 
+#[derive(Deserialize)]
 pub struct ConfigInput {
     pub bot_token: String,
     pub api_id: u32,
