@@ -8,6 +8,7 @@ exatamente estes arquivos neste diretório:
 - `03-onboarding.png` — assistente sem credenciais visíveis.
 - `04-send-confirmation.png` — janela de confirmação com checkbox inicialmente
   desmarcado.
+- `05-send-success.png` — confirmação real de envio concluído em 100%.
 
 Não substitua essas imagens por mockups, e não inclua token, `api_hash`, chat ID
 ou caminhos de gravações. `installer/macos/verify-release-assets.sh --release`

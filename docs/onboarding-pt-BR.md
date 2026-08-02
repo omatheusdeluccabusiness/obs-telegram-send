@@ -3,12 +3,10 @@
 Este guia conecta o OBS ao **seu próprio** chat do Telegram. Reserve alguns
 minutos e mantenha o OBS aberto. Você não precisa usar Terminal.
 
-> **Capturas de tela pendentes antes do lançamento:** o pacote de release é
-> bloqueado até que o controlador substitua os placeholders por capturas reais
-> nestes caminhos: `images/macos/01-installer.pkg.png`,
-> `images/macos/02-tools-menu.png`, `images/macos/03-onboarding.png` e
-> `images/macos/04-send-confirmation.png`. Não há imagens ilustrativas ou
-> inventadas nesta versão.
+> **Duas capturas ainda pendentes antes do lançamento:** o pacote de release é
+> bloqueado até existirem capturas reais do instalador assinado e do menu
+> **Ferramentas → Telegram Send**. As telas reais do onboarding e da confirmação
+> já estão documentadas abaixo; não há mockups nesta versão.
 
 ## 1. Instale o pacote
 
@@ -75,6 +73,8 @@ depois que a mensagem chegar ao seu Telegram. Se falhar, use o
 [troubleshooting](troubleshooting-pt-BR.md) em vez de repetir o processo com
 dados diferentes.
 
+![Teste final concluído no OBS](images/macos/03-onboarding.png)
+
 ## 7. Envie uma gravação quando quiser
 
 1. Grave normalmente no OBS e pare a gravação.
@@ -84,6 +84,10 @@ dados diferentes.
 4. Clique em **Enviar agora**. O botão fica indisponível até você marcar a
    caixa.
 5. Aguarde o progresso. Ao terminar, confira o arquivo no Telegram.
+
+![Confirmação inicialmente desmarcada](images/macos/04-send-confirmation.png)
+
+![Envio real concluído em 100%](images/macos/05-send-success.png)
 
 **Não enviar** apenas fecha a janela. A gravação permanece no seu Mac em todos
 os casos. Em erro de rede, use **Tentar novamente** quando estiver pronto.

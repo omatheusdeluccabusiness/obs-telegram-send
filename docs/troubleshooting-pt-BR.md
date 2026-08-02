@@ -1,10 +1,9 @@
 # Solução de problemas — OBS Telegram Send
 
-> **Capturas de tela pendentes antes do lançamento:** o verificador de release
-> exige as imagens reais em `images/macos/01-installer.pkg.png`,
-> `images/macos/02-tools-menu.png`, `images/macos/03-onboarding.png` e
-> `images/macos/04-send-confirmation.png`. Esta versão não usa imagens
-> fictícias.
+> **Duas capturas ainda pendentes antes do lançamento:** o verificador de
+> release continua exigindo imagens reais do instalador assinado e do menu do
+> OBS. As telas reais do onboarding e do envio já estão no guia; esta versão
+> não usa imagens fictícias.
 
 ## O menu “Telegram Send” não aparece no OBS
 
@@ -52,7 +51,7 @@ diretamente. O início só é aceito quando a API local confirma o bot com
 Nunca envie token, `api_hash` ou uma captura desses campos ao pedir ajuda.
 
 O servidor local grava somente em
-`~/Library/Application Support/OBS-Telegram-Send/telegram-bot-api/` e em sua
+`~/Library/Application Support/OBS-Telegram-Send/telegram-bot-api-data/` e em sua
 pasta `temp/`. Essas pastas pertencem ao usuário da sessão e têm permissão
 privada; ele não tenta criar arquivos em `/` nem usa a pasta do usuário root.
 

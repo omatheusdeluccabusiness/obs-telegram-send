@@ -16,7 +16,7 @@ local aleatório em `~/Library/Application Support/OBS-Telegram-Send/`, com
 permissão de usuário; o pacote não contém tokens, `api_id`, `api_hash` nem
 caminhos de gravações. A configuração do Telegram fica no Keychain do macOS.
 Os dados operacionais do servidor oficial ficam em
-`~/Library/Application Support/OBS-Telegram-Send/telegram-bot-api/` e sua pasta
+`~/Library/Application Support/OBS-Telegram-Send/telegram-bot-api-data/` e sua pasta
 `temp/`, ambas privadas (`0700`); o agente passa esses caminhos explicitamente
 ao processo e não depende do diretório atual do LaunchAgent.
 O servidor oficial só é iniciado depois de uma ação explícita do assistente de
