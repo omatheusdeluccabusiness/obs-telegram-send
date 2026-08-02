@@ -1,6 +1,9 @@
 use axum::{routing::get, Json, Router};
 use serde_json::json;
 
+pub mod config;
+pub mod keychain;
+
 pub fn app() -> Router {
     Router::new().route(
         "/health",
