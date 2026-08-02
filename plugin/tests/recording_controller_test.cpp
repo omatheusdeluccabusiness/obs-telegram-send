@@ -124,6 +124,28 @@ TEST(SendConfirmationDialog, ConfirmsOnlyAfterCheckedSendButtonClick)
 	EXPECT_EQ(confirmations, 1);
 }
 
+TEST(SendConfirmationDialog, ClosesAfterConfirmedSendHandlerReturns)
+{
+	SendConfirmationDialog dialog(nullptr);
+	bool visible_during_handler = false;
+	dialog.set_send_confirmed_handler([&dialog, &visible_during_handler](const RecordingMetadata &) {
+		visible_during_handler = dialog.isVisible();
+	});
+	dialog.show_for(metadata("take.mp4", 300));
+	auto *consent = dialog.findChild<QCheckBox *>("sendConsentCheckBox");
+	auto *send = dialog.findChild<QPushButton *>("sendNowButton");
+	ASSERT_NE(consent, nullptr);
+	ASSERT_NE(send, nullptr);
+	ASSERT_TRUE(dialog.isVisible());
+
+	consent->setChecked(true);
+	send->click();
+
+	EXPECT_TRUE(visible_during_handler);
+	EXPECT_FALSE(dialog.isVisible());
+	EXPECT_EQ(dialog.result(), QDialog::Accepted);
+}
+
 } // namespace
 
 int main(int argc, char **argv)

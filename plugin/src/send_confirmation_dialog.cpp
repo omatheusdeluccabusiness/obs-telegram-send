@@ -76,6 +76,7 @@ SendConfirmationDialog::SendConfirmationDialog(QWidget *parent) : QDialog(parent
 		send_button_->setEnabled(false);
 		if (send_confirmed_)
 			send_confirmed_(metadata_);
+		accept();
 	});
 }
 
