@@ -20,9 +20,12 @@ Os dados operacionais do servidor oficial ficam em
 `temp/`, ambas privadas (`0700`); o agente passa esses caminhos explicitamente
 ao processo e não depende do diretório atual do LaunchAgent.
 O servidor oficial só é iniciado depois de uma ação explícita do assistente de
-configuração. Antes de iniciar o servidor local, o agente chama `logOut` na API
-cloud do Telegram, como exigido pelo Telegram para que o `/start` possa ser
-recebido localmente.
+configuração. Antes da primeira inicialização local, o agente chama `logOut` na
+API cloud do Telegram, como exigido pelo Telegram para que o `/start` possa ser
+recebido localmente. Depois do sucesso, grava somente um marcador privado
+(`0600`) identificado pelo SHA-256 do token — o token nunca é gravado nesse
+marcador. Assim, se o processo local falhar, a próxima tentativa pula o
+`logOut` já concluído e valida o bot local com `getMe` antes de aceitar o início.
 
 Leia o guia para clientes em [docs/onboarding-pt-BR.md](docs/onboarding-pt-BR.md)
 e a solução de problemas em [docs/troubleshooting-pt-BR.md](docs/troubleshooting-pt-BR.md).

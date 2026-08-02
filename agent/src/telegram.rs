@@ -1,7 +1,9 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    future::Future,
+    io::Write,
     net::{Ipv4Addr, SocketAddr, TcpStream},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command},
     time::Duration,
@@ -15,6 +17,7 @@ use reqwest::{
 };
 use secrecy::ExposeSecret;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 
@@ -342,13 +345,16 @@ impl LocalBotApiServer {
 
     /// Moves the bot out of Telegram's hosted Bot API before a local server
     /// claims updates. Telegram documents `logOut` as the required transition;
-    /// repeating it is safe and keeps restarts recoverable.
+    /// a private token-fingerprint marker keeps restarts recoverable after a
+    /// successful transition.
     pub async fn start_after_cloud_logout(
         config: &TelegramConfig,
         port: u16,
     ) -> Result<Self, TelegramError> {
-        migrate_bot_to_local(config, TELEGRAM_CLOUD_BOT_API_ENDPOINT, || {
-            Self::start(config, port)
+        migrate_bot_to_local(config, TELEGRAM_CLOUD_BOT_API_ENDPOINT, || async {
+            let server = Self::start(config, port)?;
+            server.validate_bot(&config.bot_token).await?;
+            Ok(server)
         })
         .await
     }
@@ -360,7 +366,11 @@ impl LocalBotApiServer {
         migrate_bot_token_to_local(
             &credentials.bot_token,
             TELEGRAM_CLOUD_BOT_API_ENDPOINT,
-            || Self::start_with_onboarding_credentials(credentials, port),
+            || async {
+                let server = Self::start_with_onboarding_credentials(credentials, port)?;
+                server.validate_bot(&credentials.bot_token).await?;
+                Ok(server)
+            },
         )
         .await
     }
@@ -421,6 +431,41 @@ impl LocalBotApiServer {
         format!("http://127.0.0.1:{}", self.port)
     }
 
+    async fn validate_bot(&self, bot_token: &secrecy::SecretString) -> Result<(), TelegramError> {
+        Self::validate_bot_at(bot_token, &self.endpoint()).await
+    }
+
+    pub async fn validate_bot_at(
+        bot_token: &secrecy::SecretString,
+        endpoint: &str,
+    ) -> Result<(), TelegramError> {
+        let url = format!(
+            "{}/bot{}/getMe",
+            endpoint.trim_end_matches('/'),
+            bot_token.expose_secret()
+        );
+        for attempt in 0..20 {
+            let valid = match Client::new().get(&url).send().await {
+                Ok(response) if response.status().is_success() => {
+                    response
+                        .json::<Value>()
+                        .await
+                        .ok()
+                        .and_then(|body| body.get("ok").and_then(Value::as_bool))
+                        == Some(true)
+                }
+                _ => false,
+            };
+            if valid {
+                return Ok(());
+            }
+            if attempt < 19 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        Err(TelegramError::RequestFailed)
+    }
+
     pub fn ensure_ready(&mut self) -> Result<(), TelegramError> {
         if self
             .child
@@ -479,44 +524,142 @@ impl LocalBotApiServer {
 /// Call Telegram's hosted `logOut` endpoint before creating the local server.
 /// The endpoint is an argument so tests can exercise the transition entirely
 /// against a loopback fake; production always supplies Telegram's cloud URL.
-pub async fn migrate_bot_to_local<T, Start>(
+pub async fn migrate_bot_to_local<T, Start, StartFuture>(
     config: &TelegramConfig,
     cloud_endpoint: &str,
     start_local_server: Start,
 ) -> Result<T, TelegramError>
 where
-    Start: FnOnce() -> Result<T, TelegramError>,
+    Start: FnOnce() -> StartFuture,
+    StartFuture: Future<Output = Result<T, TelegramError>>,
 {
-    migrate_bot_token_to_local(&config.bot_token, cloud_endpoint, start_local_server).await
+    let marker_directory = migration_marker_directory()?;
+    migrate_bot_token_to_local_at(
+        &config.bot_token,
+        cloud_endpoint,
+        &marker_directory,
+        start_local_server,
+    )
+    .await
 }
 
-async fn migrate_bot_token_to_local<T, Start>(
+pub async fn migrate_bot_to_local_at<T, Start, StartFuture>(
+    config: &TelegramConfig,
+    cloud_endpoint: &str,
+    marker_directory: &Path,
+    start_local_server: Start,
+) -> Result<T, TelegramError>
+where
+    Start: FnOnce() -> StartFuture,
+    StartFuture: Future<Output = Result<T, TelegramError>>,
+{
+    migrate_bot_token_to_local_at(
+        &config.bot_token,
+        cloud_endpoint,
+        marker_directory,
+        start_local_server,
+    )
+    .await
+}
+
+async fn migrate_bot_token_to_local<T, Start, StartFuture>(
     bot_token: &secrecy::SecretString,
     cloud_endpoint: &str,
     start_local_server: Start,
 ) -> Result<T, TelegramError>
 where
-    Start: FnOnce() -> Result<T, TelegramError>,
+    Start: FnOnce() -> StartFuture,
+    StartFuture: Future<Output = Result<T, TelegramError>>,
 {
+    let marker_directory = migration_marker_directory()?;
+    migrate_bot_token_to_local_at(
+        bot_token,
+        cloud_endpoint,
+        &marker_directory,
+        start_local_server,
+    )
+    .await
+}
+
+async fn migrate_bot_token_to_local_at<T, Start, StartFuture>(
+    bot_token: &secrecy::SecretString,
+    cloud_endpoint: &str,
+    marker_directory: &Path,
+    start_local_server: Start,
+) -> Result<T, TelegramError>
+where
+    Start: FnOnce() -> StartFuture,
+    StartFuture: Future<Output = Result<T, TelegramError>>,
+{
+    fs::create_dir_all(marker_directory).map_err(|_| TelegramError::RequestFailed)?;
+    fs::set_permissions(marker_directory, fs::Permissions::from_mode(0o700))
+        .map_err(|_| TelegramError::RequestFailed)?;
+    let marker = marker_directory.join(token_fingerprint(bot_token));
+    if marker.is_file() {
+        return start_local_server().await;
+    }
+
     let endpoint = cloud_endpoint.trim_end_matches('/');
-    let response = Client::new()
+    let cloud_logout_succeeded = Client::new()
         .post(format!(
             "{endpoint}/bot{}/logOut",
             bot_token.expose_secret()
         ))
         .send()
         .await
-        .map_err(|_| TelegramError::RequestFailed)?
-        .error_for_status()
-        .map_err(|_| TelegramError::RequestFailed)?;
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|_| TelegramError::RequestFailed)?;
-    if body.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(TelegramError::RequestFailed);
+        .ok()
+        .filter(|response| response.status().is_success());
+    let cloud_logout_succeeded = match cloud_logout_succeeded {
+        Some(response) => {
+            response
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|body| body.get("ok").and_then(Value::as_bool))
+                == Some(true)
+        }
+        None => false,
+    };
+    if cloud_logout_succeeded {
+        write_migration_marker(&marker)?;
+        return start_local_server().await;
     }
-    start_local_server()
+
+    let result = start_local_server().await;
+    if result.is_ok() {
+        write_migration_marker(&marker)?;
+    }
+    result
+}
+
+fn migration_marker_directory() -> Result<PathBuf, TelegramError> {
+    let base_directories = BaseDirs::new().ok_or(TelegramError::RequestFailed)?;
+    Ok(base_directories
+        .data_local_dir()
+        .join(APP_SUPPORT_DIRECTORY_NAME)
+        .join("telegram-bot-api/cloud-migrations"))
+}
+
+fn token_fingerprint(bot_token: &secrecy::SecretString) -> String {
+    Sha256::digest(bot_token.expose_secret().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn write_migration_marker(path: &Path) -> Result<(), TelegramError> {
+    let mut marker = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|_| TelegramError::RequestFailed)?;
+    marker
+        .write_all(b"cloud-logout-completed\n")
+        .map_err(|_| TelegramError::RequestFailed)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|_| TelegramError::RequestFailed)
 }
 
 impl Drop for LocalBotApiServer {

@@ -6,7 +6,7 @@ use axum::{
 };
 use obs_telegram_agent::{
     config::{validate_config, ConfigInput},
-    telegram::{migrate_bot_to_local, LocalBotApiServer, TelegramGateway},
+    telegram::{migrate_bot_to_local_at, LocalBotApiServer, TelegramGateway},
 };
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
@@ -181,15 +181,139 @@ async fn logs_out_from_the_cloud_before_starting_the_local_server() {
     let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let started_by_server = started.clone();
 
-    migrate_bot_to_local(&config, &format!("http://{address}"), move || {
-        started_by_server.store(true, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
-    })
+    let markers = tempfile::tempdir().unwrap();
+    migrate_bot_to_local_at(
+        &config,
+        &format!("http://{address}"),
+        markers.path(),
+        move || async move {
+            started_by_server.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        },
+    )
     .await
     .unwrap();
 
     assert_eq!(*calls.lock().unwrap(), vec!["logOut"]);
     assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn successful_cloud_logout_is_remembered_before_a_failed_local_start() {
+    let cloud_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/bot123:token/logOut",
+        post({
+            let cloud_calls = cloud_calls.clone();
+            move || {
+                let cloud_calls = cloud_calls.clone();
+                async move {
+                    cloud_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Json(json!({"ok": true, "result": true}))
+                }
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = validate_config(ConfigInput {
+        bot_token: "123:token".to_owned(),
+        api_id: 123,
+        api_hash: "0123456789abcdef0123456789abcdef".to_owned(),
+        chat_id: -10012345,
+    })
+    .unwrap();
+    let markers = tempfile::tempdir().unwrap();
+    let endpoint = format!("http://{address}");
+
+    assert_eq!(
+        migrate_bot_to_local_at(&config, &endpoint, markers.path(), || async {
+            Err::<(), _>(obs_telegram_agent::telegram::TelegramError::RequestFailed)
+        })
+        .await,
+        Err(obs_telegram_agent::telegram::TelegramError::RequestFailed)
+    );
+    migrate_bot_to_local_at(&config, &endpoint, markers.path(), || async { Ok(()) })
+        .await
+        .unwrap();
+
+    assert_eq!(cloud_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let marker_names: Vec<String> = std::fs::read_dir(markers.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(marker_names.len(), 1);
+    assert_eq!(marker_names[0].len(), 64);
+    assert!(marker_names[0]
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    assert!(
+        !std::fs::read_to_string(markers.path().join(&marker_names[0]))
+            .unwrap()
+            .contains("123:token")
+    );
+    assert_eq!(
+        std::fs::metadata(markers.path().join(&marker_names[0]))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[tokio::test]
+async fn a_non_ok_cloud_response_still_allows_a_valid_local_start() {
+    let app = Router::new().route(
+        "/bot123:token/logOut",
+        post(|| async { Json(json!({"ok": false, "description": "already logged out"})) }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = validate_config(ConfigInput {
+        bot_token: "123:token".to_owned(),
+        api_id: 123,
+        api_hash: "0123456789abcdef0123456789abcdef".to_owned(),
+        chat_id: -10012345,
+    })
+    .unwrap();
+    let markers = tempfile::tempdir().unwrap();
+
+    migrate_bot_to_local_at(
+        &config,
+        &format!("http://{address}"),
+        markers.path(),
+        || async { Ok(()) },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(std::fs::read_dir(markers.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn local_bot_validation_rejects_a_non_ok_get_me_response() {
+    let app = Router::new().route(
+        "/bot123:token/getMe",
+        get(|| async { Json(json!({"ok": false, "description": "Unauthorized"})) }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = validate_config(ConfigInput {
+        bot_token: "123:token".to_owned(),
+        api_id: 123,
+        api_hash: "0123456789abcdef0123456789abcdef".to_owned(),
+        chat_id: -10012345,
+    })
+    .unwrap();
+
+    assert_eq!(
+        LocalBotApiServer::validate_bot_at(&config.bot_token, &format!("http://{address}")).await,
+        Err(obs_telegram_agent::telegram::TelegramError::RequestFailed)
+    );
 }
 
 #[test]

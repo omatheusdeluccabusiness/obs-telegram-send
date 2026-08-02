@@ -28,9 +28,12 @@
   agente cria `telegram-bot-api/` e `telegram-bot-api/temp/` sob o Application
   Support do usuário, aplica `0700`, passa `--dir` e `--temp-dir` ao child e
   também define cwd para a pasta privada como defesa adicional.
-- Antes de qualquer inicialização do Bot API local (onboarding, configuração
-  salva ou relançamento), o agente chama `logOut` na API cloud do Telegram. O
-  teste usa uma API cloud fake em loopback e não faz chamada real.
+- Antes da primeira inicialização do Bot API local, o agente chama `logOut` na
+  API cloud do Telegram e persiste imediatamente um marcador privado `0600`
+  cujo nome é somente o SHA-256 do token. Reinícios pulam o `logOut` já
+  concluído; respostas cloud indisponíveis/não-ok ainda permitem tentar o
+  servidor local. O início só é aceito após `getMe` local com `ok: true`, então
+  token inválido não é silenciosamente aceito.
 - Onboarding e troubleshooting PT-BR foram escritos para cliente leigo, com os
   quatro paths reais de screenshot que o controlador deve capturar. O release
   é bloqueado enquanto faltarem. O uninstall remove apenas os três alvos de
@@ -55,7 +58,7 @@
    com o fake em loopback.
 3. O teste do caminho empacotado inicialmente não compilou porque
    `packaged_executable_path` não existia; passa sem depender do `PATH`.
-4. `cargo test --manifest-path agent/Cargo.toml`: 40 testes passaram na rodada
+4. `cargo test --manifest-path agent/Cargo.toml`: 42 testes passaram na rodada
    completa final. `bash -n`, `plutil -lint` e `git diff --check` passaram.
 5. `cargo build --manifest-path agent/Cargo.toml --release` gerou o agente
    arm64 usado no pacote. O plugin arm64 já compilado em `build/` foi usado.
@@ -83,6 +86,13 @@
     passaram confirmando paths exatos, criação e permissões `0700`, além de
     `--dir`/`--temp-dir` explícitos. O agente release foi recompilado antes do
     pacote development.
+12. TDD da retomada de migração: o teste inicialmente não compilou porque
+    `migrate_bot_to_local_at` e `validate_bot_at` não existiam. Depois passou
+    reproduzindo `logOut` bem-sucedido + falha local + retry bem-sucedido e
+    confirmou uma única chamada cloud, fingerprint hexadecimal de 64 caracteres,
+    ausência do token no arquivo e modo `0600`. Outro teste confirma que
+    `getMe` local com `ok: false` é recusado; uma resposta cloud não-ok também
+    foi coberta e não impede uma inicialização local válida.
 
 ## Self-review e preocupações reais
 
@@ -100,10 +110,10 @@
 - `security find-identity` confirmou **0 identidades válidas** tanto para
   codesigning quanto para installer. Portanto não há release/notarização neste
   ambiente; o modo release falha fechada, como previsto.
-- As quatro screenshots reais ainda não existem. O pacote development foi
-  construído para inspeção, mas está explicitamente marcado não-publicável;
-  capture as imagens nos paths de `docs/images/macos/README.md` antes de tentar
-  uma release.
+- A screenshot real `docs/images/macos/01-installer.pkg.png` ainda não existe;
+  as outras três foram preservadas. O pacote development foi construído para
+  inspeção, mas está explicitamente marcado não-publicável; capture a imagem
+  pendente antes de tentar uma release.
 - A flakiness observada em `agent/tests/install_bearer_test.rs` tinha origem no
   helper de teste que apenas calculava nomes com `SystemTime::now().as_nanos()`
   sem reservar o diretório; testes paralelos podiam compartilhar/remover o

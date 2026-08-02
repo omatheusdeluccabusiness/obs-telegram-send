@@ -35,7 +35,10 @@ antes de confirmar a origem e comunicar o suporte.
 
 O serviço local precisa chamar `logOut` na API cloud antes de receber updates.
 Isso é normal e significa que o mesmo bot não deve receber updates em dois
-lugares ao mesmo tempo.
+lugares ao mesmo tempo. Se essa etapa já terminou mas o servidor local falhou,
+a próxima tentativa usa um marcador privado sem o token e tenta iniciar
+diretamente. O início só é aceito quando a API local confirma o bot com
+`getMe`; token inválido continua sendo recusado.
 
 ## A mensagem de teste ou o envio falha
 
