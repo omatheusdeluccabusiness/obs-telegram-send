@@ -233,7 +233,7 @@ pub async fn enqueue(&self, path: PathBuf, display_name: String) -> Result<JobId
 }
 ```
 
-Use `telegram-bot-api --local --api-id <id> --api-hash <hash> --http-port <loopback-port>` and send `sendVideo` for MP4 or `sendDocument` otherwise. Store only job id, filename, state, size and retryable error; never persist the absolute recording path after a completed job.
+Start `telegram-bot-api --local --http-port <loopback-port>` with `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` supplied only in the child process environment, then send `sendVideo` for MP4 or `sendDocument` otherwise. Store only job id, filename, state, size and retryable error; never persist the absolute recording path after a completed job.
 
 - [ ] **Step 4: Run unit and fake-endpoint integration tests**
 
