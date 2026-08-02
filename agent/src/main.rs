@@ -24,6 +24,7 @@ async fn main() {
         .await
         .expect("agent must bind to the local loopback interface");
     let local_bot_api = LocalBotApiServer::start_if_configured(0)
+        .await
         .expect("agent must load its protected Telegram configuration");
     axum::serve(
         listener,

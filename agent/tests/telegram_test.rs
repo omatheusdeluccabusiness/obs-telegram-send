@@ -6,7 +6,7 @@ use axum::{
 };
 use obs_telegram_agent::{
     config::{validate_config, ConfigInput},
-    telegram::{LocalBotApiServer, TelegramGateway},
+    telegram::{migrate_bot_to_local, LocalBotApiServer, TelegramGateway},
 };
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -78,6 +78,14 @@ fn local_bot_api_arguments_force_an_isolated_loopback_listener() {
         .any(|pair| pair == ["--http-port", "41723"]));
 }
 
+#[test]
+fn packaged_server_path_does_not_depend_on_the_shell_path() {
+    assert_eq!(
+        LocalBotApiServer::packaged_executable_path(),
+        std::path::Path::new("/Library/Application Support/OBS-Telegram-Send/telegram-bot-api")
+    );
+}
+
 #[tokio::test]
 async fn chat_detection_ignores_an_unrelated_newer_update_without_its_start_nonce() {
     let config = validate_config(ConfigInput {
@@ -103,6 +111,47 @@ async fn chat_detection_ignores_an_unrelated_newer_update_without_its_start_nonc
 
     assert_eq!(gateway.detect_chat_for_nonce("accepted").await.unwrap(), 42);
     assert!(gateway.detect_chat_for_nonce("missing").await.is_err());
+}
+
+#[tokio::test]
+async fn logs_out_from_the_cloud_before_starting_the_local_server() {
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = Router::new().route(
+        "/bot123:token/logOut",
+        post({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    calls.lock().unwrap().push("logOut".to_owned());
+                    Json(json!({"ok": true, "result": true}))
+                }
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = validate_config(ConfigInput {
+        bot_token: "123:token".to_owned(),
+        api_id: 123,
+        api_hash: "0123456789abcdef0123456789abcdef".to_owned(),
+        chat_id: -10012345,
+    })
+    .unwrap();
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started_by_server = started.clone();
+
+    migrate_bot_to_local(&config, &format!("http://{address}"), move || {
+        started_by_server.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), vec!["logOut"]);
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[test]

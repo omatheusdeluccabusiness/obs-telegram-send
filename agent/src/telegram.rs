@@ -22,6 +22,9 @@ use crate::{
 };
 
 pub const DEFAULT_BOT_API_ENDPOINT: &str = "http://127.0.0.1:8081";
+pub const TELEGRAM_CLOUD_BOT_API_ENDPOINT: &str = "https://api.telegram.org";
+pub const PACKAGED_BOT_API_PATH: &str =
+    "/Library/Application Support/OBS-Telegram-Send/telegram-bot-api";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TelegramError {
@@ -276,6 +279,10 @@ pub struct LocalBotApiServer {
 }
 
 impl LocalBotApiServer {
+    pub fn packaged_executable_path() -> PathBuf {
+        PathBuf::from(PACKAGED_BOT_API_PATH)
+    }
+
     pub fn start(config: &TelegramConfig, port: u16) -> Result<Self, TelegramError> {
         Self::start_with_credentials(config.api_id, config.api_hash.expose_secret(), port)
     }
@@ -291,6 +298,31 @@ impl LocalBotApiServer {
         )
     }
 
+    /// Moves the bot out of Telegram's hosted Bot API before a local server
+    /// claims updates. Telegram documents `logOut` as the required transition;
+    /// repeating it is safe and keeps restarts recoverable.
+    pub async fn start_after_cloud_logout(
+        config: &TelegramConfig,
+        port: u16,
+    ) -> Result<Self, TelegramError> {
+        migrate_bot_to_local(config, TELEGRAM_CLOUD_BOT_API_ENDPOINT, || {
+            Self::start(config, port)
+        })
+        .await
+    }
+
+    pub async fn start_onboarding_after_cloud_logout(
+        credentials: &TelegramCredentials,
+        port: u16,
+    ) -> Result<Self, TelegramError> {
+        migrate_bot_token_to_local(
+            &credentials.bot_token,
+            TELEGRAM_CLOUD_BOT_API_ENDPOINT,
+            || Self::start_with_onboarding_credentials(credentials, port),
+        )
+        .await
+    }
+
     fn start_with_credentials(
         api_id: u32,
         api_hash: &str,
@@ -301,7 +333,10 @@ impl LocalBotApiServer {
         } else {
             port
         };
-        let child = Command::new("telegram-bot-api")
+        let executable = std::env::var_os("OBS_TELEGRAM_BOT_API_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(Self::packaged_executable_path);
+        let child = Command::new(executable)
             .args(Self::command_arguments(port))
             .env("TELEGRAM_API_ID", api_id.to_string())
             .env("TELEGRAM_API_HASH", api_hash)
@@ -322,14 +357,16 @@ impl LocalBotApiServer {
         ]
     }
 
-    pub fn start_if_configured(port: u16) -> Result<Option<Self>, TelegramError> {
+    pub async fn start_if_configured(port: u16) -> Result<Option<Self>, TelegramError> {
         let Some(config) = SecretStore::new()
             .and_then(|store| store.load())
             .map_err(|_| TelegramError::ConfigurationUnavailable)?
         else {
             return Ok(None);
         };
-        Self::start(&config, port).map(Some)
+        Self::start_after_cloud_logout(&config, port)
+            .await
+            .map(Some)
     }
 
     pub fn endpoint(&self) -> String {
@@ -389,6 +426,49 @@ impl LocalBotApiServer {
         }
         Err(TelegramError::RequestFailed)
     }
+}
+
+/// Call Telegram's hosted `logOut` endpoint before creating the local server.
+/// The endpoint is an argument so tests can exercise the transition entirely
+/// against a loopback fake; production always supplies Telegram's cloud URL.
+pub async fn migrate_bot_to_local<T, Start>(
+    config: &TelegramConfig,
+    cloud_endpoint: &str,
+    start_local_server: Start,
+) -> Result<T, TelegramError>
+where
+    Start: FnOnce() -> Result<T, TelegramError>,
+{
+    migrate_bot_token_to_local(&config.bot_token, cloud_endpoint, start_local_server).await
+}
+
+async fn migrate_bot_token_to_local<T, Start>(
+    bot_token: &secrecy::SecretString,
+    cloud_endpoint: &str,
+    start_local_server: Start,
+) -> Result<T, TelegramError>
+where
+    Start: FnOnce() -> Result<T, TelegramError>,
+{
+    let endpoint = cloud_endpoint.trim_end_matches('/');
+    let response = Client::new()
+        .post(format!(
+            "{endpoint}/bot{}/logOut",
+            bot_token.expose_secret()
+        ))
+        .send()
+        .await
+        .map_err(|_| TelegramError::RequestFailed)?
+        .error_for_status()
+        .map_err(|_| TelegramError::RequestFailed)?;
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|_| TelegramError::RequestFailed)?;
+    if body.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(TelegramError::RequestFailed);
+    }
+    start_local_server()
 }
 
 impl Drop for LocalBotApiServer {

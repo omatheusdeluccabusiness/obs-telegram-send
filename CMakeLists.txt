@@ -29,3 +29,10 @@ endif()
 
 include(CTest)
 add_subdirectory(plugin)
+
+# This is the exact destination consumed by the macOS installer payload.
+set(OBS_TELEGRAM_PLUGIN_INSTALL_DIR
+    "Library/Application Support/obs-studio/plugins"
+    CACHE PATH "System OBS plugin directory used by the macOS package")
+install(TARGETS obs-telegram-send
+  BUNDLE DESTINATION "${OBS_TELEGRAM_PLUGIN_INSTALL_DIR}")

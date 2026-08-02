@@ -47,31 +47,45 @@ impl ApiState {
         debug_assert!(state.gateway.uses_server_handle(&state.local_bot_api));
         state
     }
-    fn start_local_bot_api(
+    async fn start_local_bot_api(
         &self,
         configuration: &crate::config::TelegramConfig,
     ) -> Result<(), TelegramError> {
+        if self.local_bot_api.lock().unwrap().is_some() {
+            return Ok(());
+        }
+        let candidate = LocalBotApiServer::start_after_cloud_logout(configuration, 0).await?;
         let mut server = self.local_bot_api.lock().unwrap();
         if server.is_none() {
-            *server = Some(LocalBotApiServer::start(configuration, 0)?);
+            *server = Some(candidate);
         }
         Ok(())
     }
 
-    fn start_onboarding_bot_api(
+    async fn start_onboarding_bot_api(
         &self,
         credentials: &TelegramCredentials,
     ) -> Result<String, TelegramError> {
+        if self
+            .local_bot_api
+            .lock()
+            .map_err(|_| TelegramError::RequestFailed)?
+            .is_none()
+        {
+            let candidate =
+                LocalBotApiServer::start_onboarding_after_cloud_logout(credentials, 0).await?;
+            let mut server = self
+                .local_bot_api
+                .lock()
+                .map_err(|_| TelegramError::RequestFailed)?;
+            if server.is_none() {
+                *server = Some(candidate);
+            }
+        }
         let mut server = self
             .local_bot_api
             .lock()
             .map_err(|_| TelegramError::RequestFailed)?;
-        if server.is_none() {
-            *server = Some(LocalBotApiServer::start_with_onboarding_credentials(
-                credentials,
-                0,
-            )?);
-        }
         let server = server.as_mut().ok_or(TelegramError::RequestFailed)?;
         server.ensure_ready()?;
         Ok(server.endpoint())
@@ -212,7 +226,7 @@ async fn save_configuration(
 
     let result = SecretStore::new().and_then(|store| store.save(&configuration));
     match result {
-        Ok(()) => match state.start_local_bot_api(&configuration) {
+        Ok(()) => match state.start_local_bot_api(&configuration).await {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -314,7 +328,7 @@ async fn detect_chat(
     if let Some(chat_id) = input.confirmed_chat_id.filter(|chat_id| *chat_id != 0) {
         return Json(serde_json::json!({ "chat_id": chat_id, "confirmed": true })).into_response();
     }
-    let endpoint = match state.start_onboarding_bot_api(&credentials) {
+    let endpoint = match state.start_onboarding_bot_api(&credentials).await {
         Ok(endpoint) => endpoint,
         Err(_) => {
             return (
