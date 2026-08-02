@@ -3,7 +3,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use obs_telegram_agent::app;
+use obs_telegram_agent::app_with_secret;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -14,7 +14,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn health_returns_the_current_protocol_version() {
-    let response = app()
+    let response = app_with_secret("test-install-bearer")
         .oneshot(Request::get("/health").body(Body::empty()).unwrap())
         .await
         .unwrap();
