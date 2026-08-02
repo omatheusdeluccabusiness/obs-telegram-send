@@ -1,0 +1,39 @@
+name: Test Windows agent
+
+on:
+  pull_request:
+    paths:
+      - 'agent/**'
+      - '.github/workflows/windows-agent.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'agent/**'
+      - '.github/workflows/windows-agent.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-agent:
+    name: Build and test agent (Windows x64)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Test Rust agent on the target platform
+        shell: pwsh
+        run: |
+          cargo test --manifest-path agent/Cargo.toml
+          cargo clippy --manifest-path agent/Cargo.toml --all-targets -- -D warnings
+          cargo build --manifest-path agent/Cargo.toml --release
+
+      - name: Upload Windows agent candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: obs-telegram-agent-windows-x64
+          path: agent/target/release/obs-telegram-agent.exe
+          if-no-files-found: error
+          retention-days: 14
