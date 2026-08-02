@@ -1,8 +1,7 @@
 use std::{
     collections::HashMap,
-    fs::{self, OpenOptions},
+    fs,
     io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -13,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     install_bearer::APP_SUPPORT_DIRECTORY_NAME,
+    private_fs::{ensure_private_directory, ensure_private_file, private_create_new},
     telegram::{TelegramClient, UploadError},
 };
 
@@ -69,9 +69,7 @@ impl JobStore {
     }
 
     fn at(directory: &Path) -> Result<Self, JobError> {
-        fs::create_dir_all(directory).map_err(|_| JobError::StorageUnavailable)?;
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
-            .map_err(|_| JobError::StorageUnavailable)?;
+        ensure_private_directory(directory).map_err(|_| JobError::StorageUnavailable)?;
         Ok(Self {
             path: Some(directory.join(JOBS_FILE_NAME)),
         })
@@ -118,12 +116,7 @@ impl JobStore {
             ".{JOBS_FILE_NAME}.{:016x}.tmp",
             rand::random::<u64>()
         ));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
-            .map_err(|_| JobError::StorageUnavailable)?;
+        let mut file = private_create_new(&temporary).map_err(|_| JobError::StorageUnavailable)?;
         if file
             .write_all(&serialized)
             .and_then(|_| file.sync_all())
@@ -137,8 +130,7 @@ impl JobStore {
             let _ = fs::remove_file(&temporary);
             return Err(JobError::StorageUnavailable);
         }
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|_| JobError::StorageUnavailable)
+        ensure_private_file(path).map_err(|_| JobError::StorageUnavailable)
     }
 }
 

@@ -1,4 +1,7 @@
-use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, thread};
+use std::{fs, path::PathBuf};
+
+#[cfg(unix)]
+use std::{os::unix::fs::PermissionsExt, thread};
 
 use obs_telegram_agent::install_bearer::InstallBearerStore;
 use secrecy::ExposeSecret;
@@ -40,6 +43,7 @@ fn install_bearer_is_stable_across_store_restarts() {
 }
 
 #[test]
+#[cfg(unix)]
 fn install_bearer_store_uses_owner_only_directory_and_file_permissions() {
     let directory = temporary_app_support_directory();
     let store = InstallBearerStore::at(directory.clone());
@@ -62,6 +66,7 @@ fn install_bearer_store_uses_owner_only_directory_and_file_permissions() {
 }
 
 #[test]
+#[cfg(unix)]
 fn reader_retries_until_a_concurrently_written_bearer_is_complete() {
     let directory = temporary_app_support_directory();
     let store = InstallBearerStore::at(directory.clone());
