@@ -200,6 +200,84 @@ TEST(AgentClient, RealLoopbackTransportPreservesRouteAuthBodyAndDecodesTransient
 	EXPECT_TRUE(server.requests()[2].startsWith("GET /v1/jobs/job-7 HTTP/1.1\r\n"));
 }
 
+TEST(AgentClient, RealLoopbackTransportCoversOnboardingAndRetryRoutes)
+{
+	LoopbackHttpServer server;
+	server.respond(200, QByteArrayLiteral("{}"));
+	server.respond(200, QByteArrayLiteral("{\"chat_id\":-100987654321,\"challenge\":\"nonce-42\","
+	                                     "\"confirmed\":true}"));
+	server.respond(200, QByteArrayLiteral("{}"));
+	server.respond(200, QByteArrayLiteral("{\"job_id\":\"job-7\",\"filename\":\"take.mp4\","
+	                                     "\"state\":\"queued\",\"progress_percent\":0,"
+	                                     "\"message\":\"Nova tentativa na fila\"}"));
+	AgentClient client(server.base_url(), QStringLiteral("loopback-secret"), true);
+	const auto api_hash = QStringLiteral("0123456789abcdef0123456789abcdef");
+
+	std::optional<AgentResult> saved;
+	client.save_config(QStringLiteral("123456:bot-token"), 7654321, api_hash, -100987654321,
+	                   [&saved](AgentResult result) { saved = std::move(result); });
+	ASSERT_TRUE(wait_until([&saved] { return saved.has_value(); }));
+	ASSERT_TRUE(saved->ok);
+	EXPECT_FALSE(client.configuration_known());
+
+	std::optional<ChatDetectionResult> detected;
+	client.detect_chat(QStringLiteral("123456:bot-token"), 7654321, api_hash, QStringLiteral("nonce-42"),
+	                   [&detected](ChatDetectionResult result) { detected = std::move(result); });
+	ASSERT_TRUE(wait_until([&detected] { return detected.has_value(); }));
+	ASSERT_TRUE(detected->result.ok);
+	EXPECT_EQ(detected->chat_id, -100987654321);
+	EXPECT_EQ(detected->challenge, QStringLiteral("nonce-42"));
+	EXPECT_TRUE(detected->confirmed);
+
+	std::optional<AgentResult> tested;
+	client.test_send([&tested](AgentResult result) { tested = std::move(result); });
+	ASSERT_TRUE(wait_until([&tested] { return tested.has_value(); }));
+	ASSERT_TRUE(tested->ok);
+	EXPECT_TRUE(client.configuration_known());
+	EXPECT_TRUE(client.is_ready());
+
+	std::optional<JobStatusResult> retried;
+	client.retry_job(QStringLiteral("job-7"),
+	                 [&retried](JobStatusResult result) { retried = std::move(result); });
+	ASSERT_TRUE(wait_until([&retried] { return retried.has_value(); }));
+	ASSERT_TRUE(retried->result.ok);
+	EXPECT_EQ(retried->job_id, QStringLiteral("job-7"));
+	EXPECT_EQ(retried->filename, QStringLiteral("take.mp4"));
+	EXPECT_EQ(retried->state, QStringLiteral("queued"));
+	EXPECT_EQ(retried->progress_percent, 0);
+	EXPECT_EQ(retried->message, QStringLiteral("Nova tentativa na fila"));
+
+	ASSERT_EQ(server.requests().size(), 4U);
+	for (const auto &request : server.requests())
+		EXPECT_TRUE(request.toLower().contains("authorization: bearer loopback-secret\r\n"));
+
+	EXPECT_TRUE(server.requests()[0].startsWith("POST /v1/config HTTP/1.1\r\n"));
+	const auto config_body = server.requests()[0].mid(server.requests()[0].indexOf("\r\n\r\n") + 4);
+	const auto config = QJsonDocument::fromJson(config_body).object();
+	EXPECT_EQ(config.value(QStringLiteral("bot_token")).toString(), QStringLiteral("123456:bot-token"));
+	EXPECT_EQ(config.value(QStringLiteral("api_id")).toInteger(), 7654321);
+	EXPECT_EQ(config.value(QStringLiteral("api_hash")).toString(), api_hash);
+	EXPECT_EQ(config.value(QStringLiteral("chat_id")).toInteger(), -100987654321);
+
+	EXPECT_TRUE(server.requests()[1].startsWith("POST /v1/chat/detect HTTP/1.1\r\n"));
+	const auto detect_body = server.requests()[1].mid(server.requests()[1].indexOf("\r\n\r\n") + 4);
+	const auto detect = QJsonDocument::fromJson(detect_body).object();
+	EXPECT_EQ(detect.value(QStringLiteral("bot_token")).toString(), QStringLiteral("123456:bot-token"));
+	EXPECT_EQ(detect.value(QStringLiteral("api_id")).toInteger(), 7654321);
+	EXPECT_EQ(detect.value(QStringLiteral("api_hash")).toString(), api_hash);
+	EXPECT_EQ(detect.value(QStringLiteral("challenge")).toString(), QStringLiteral("nonce-42"));
+
+	EXPECT_TRUE(server.requests()[2].startsWith("POST /v1/test-send HTTP/1.1\r\n"));
+	const auto test_body = server.requests()[2].mid(server.requests()[2].indexOf("\r\n\r\n") + 4);
+	const auto test_payload = QJsonDocument::fromJson(test_body).object();
+	EXPECT_EQ(test_payload.value(QStringLiteral("message")).toString(),
+	          QStringLiteral("OBS Telegram Send está conectado."));
+
+	EXPECT_TRUE(server.requests()[3].startsWith("POST /v1/jobs/job-7/retry HTTP/1.1\r\n"));
+	const auto retry_body = server.requests()[3].mid(server.requests()[3].indexOf("\r\n\r\n") + 4);
+	EXPECT_EQ(QJsonDocument::fromJson(retry_body).object(), QJsonObject{});
+}
+
 TEST(OnboardingDialog, UsesTheFourRequiredPortuguesePages)
 {
 	AgentClient client(QUrl(QStringLiteral("http://127.0.0.1:1")), QStringLiteral("install-secret"), false);
