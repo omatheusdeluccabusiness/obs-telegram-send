@@ -1,22 +1,27 @@
-use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::PathBuf,
-    thread,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, thread};
 
 use obs_telegram_agent::install_bearer::InstallBearerStore;
 use secrecy::ExposeSecret;
 
 fn temporary_app_support_directory() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "obs-telegram-send-bearer-test-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+    tempfile::Builder::new()
+        .prefix("obs-telegram-send-bearer-test-")
+        .tempdir()
+        .unwrap()
+        .keep()
+}
+
+#[test]
+fn temporary_app_support_directories_are_reserved_and_unique() {
+    let directories: Vec<PathBuf> = (0..32).map(|_| temporary_app_support_directory()).collect();
+
+    assert!(directories.iter().all(|directory| directory.is_dir()));
+    let unique: std::collections::HashSet<_> = directories.iter().collect();
+    assert_eq!(unique.len(), directories.len());
+
+    for directory in directories {
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
 
 #[test]

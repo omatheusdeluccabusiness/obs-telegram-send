@@ -37,8 +37,8 @@
    com o fake em loopback.
 3. O teste do caminho empacotado inicialmente não compilou porque
    `packaged_executable_path` não existia; passa sem depender do `PATH`.
-4. `cargo test --manifest-path agent/Cargo.toml`: 39 testes passaram na rodada
-   final. `bash -n`, `plutil -lint` e `git diff --check` passaram.
+4. `cargo test --manifest-path agent/Cargo.toml`: 40 testes passaram na rodada
+   completa final. `bash -n`, `plutil -lint` e `git diff --check` passaram.
 5. `cargo build --manifest-path agent/Cargo.toml --release` gerou o agente
    arm64 usado no pacote. O plugin arm64 já compilado em `build/` foi usado.
 6. `file` confirmou plugin, agente e `telegram-bot-api` como Mach-O arm64;
@@ -62,6 +62,12 @@
   destinos exigidos estão presentes, mas a pipeline de release deve construir
   fora desse ambiente instrumentado ou remover a fonte dessa xattr para evitar
   sidecars supérfluos.
+- A flakiness observada em `agent/tests/install_bearer_test.rs` tinha origem no
+  helper de teste que apenas calculava nomes com `SystemTime::now().as_nanos()`
+  sem reservar o diretório; testes paralelos podiam compartilhar/remover o
+  mesmo caminho. O helper agora reserva um `tempfile::TempDir` único de forma
+  atômica, e há teste de regressão. Foram executados 30 suites paralelos desse
+  arquivo sem falhas, além da suite completa final.
 - O pacote foi construído e inspecionado, mas não instalado no sistema global
   durante esta Task para não alterar o OBS/sessão em uso. As screenshots reais
   continuam pendentes e precisam ser capturadas após essa instalação manual.
