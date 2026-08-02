@@ -6,12 +6,13 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    config::{validate_config, ConfigInput},
+    config::{validate_config, validate_credentials, ConfigInput, TelegramCredentials},
     jobs::{JobError, JobService},
     keychain::SecretStore,
     telegram::{LocalBotApiServer, TelegramError, TelegramGateway},
@@ -28,12 +29,14 @@ struct ApiState {
 
 impl Default for ApiState {
     fn default() -> Self {
-        let gateway = TelegramGateway::default();
-        let jobs = JobService::new(gateway.clone());
+        let local_bot_api = Arc::new(Mutex::new(None));
+        let gateway = TelegramGateway::from_keychain_with_server(local_bot_api.clone());
+        let jobs = JobService::in_app_support(gateway.clone())
+            .expect("agent must access its protected local upload-job store");
         Self {
             gateway,
             jobs,
-            local_bot_api: Arc::new(Mutex::new(None)),
+            local_bot_api,
         }
     }
 }
@@ -45,9 +48,28 @@ impl ApiState {
     ) -> Result<(), TelegramError> {
         let mut server = self.local_bot_api.lock().unwrap();
         if server.is_none() {
-            *server = Some(LocalBotApiServer::start(configuration, 8081)?);
+            *server = Some(LocalBotApiServer::start(configuration, 0)?);
         }
         Ok(())
+    }
+
+    fn start_onboarding_bot_api(
+        &self,
+        credentials: &TelegramCredentials,
+    ) -> Result<String, TelegramError> {
+        let mut server = self
+            .local_bot_api
+            .lock()
+            .map_err(|_| TelegramError::RequestFailed)?;
+        if server.is_none() {
+            *server = Some(LocalBotApiServer::start_with_onboarding_credentials(
+                credentials,
+                0,
+            )?);
+        }
+        let server = server.as_mut().ok_or(TelegramError::RequestFailed)?;
+        server.ensure_ready()?;
+        Ok(server.endpoint())
     }
 }
 
@@ -117,6 +139,9 @@ impl AgentError {
                 "chat_not_found",
                 "No Telegram chat was found. Send /start to the bot first.",
             ),
+            TelegramError::FileTooLarge => {
+                ("file_too_large", "The recording is larger than 2 GiB.")
+            }
             TelegramError::RequestFailed => (
                 "telegram_request_failed",
                 "Telegram could not complete the request.",
@@ -249,17 +274,62 @@ async fn get_job(State(state): State<ApiState>, Path(job_id): Path<String>) -> R
 
 async fn retry_job(State(state): State<ApiState>, Path(job_id): Path<String>) -> Response {
     match state.jobs.retry(&job_id).await {
-        Ok(()) => match state.jobs.status(&job_id).await {
-            Ok(status) => Json(status).into_response(),
-            Err(error) => job_error_response(error),
-        },
+        Ok(status) => {
+            let jobs = state.jobs.clone();
+            let upload_job_id = job_id;
+            tokio::spawn(async move {
+                let _ = jobs.start_upload(&upload_job_id).await;
+            });
+            Json(status).into_response()
+        }
         Err(error) => job_error_response(error),
     }
 }
 
-async fn detect_chat(State(state): State<ApiState>) -> Response {
-    match state.gateway.detect_chat().await {
-        Ok(chat_id) => Json(serde_json::json!({ "chat_id": chat_id })).into_response(),
+#[derive(Deserialize)]
+struct DetectChatInput {
+    bot_token: String,
+    api_id: u32,
+    api_hash: String,
+    challenge: Option<String>,
+    confirmed_chat_id: Option<i64>,
+}
+
+async fn detect_chat(
+    State(state): State<ApiState>,
+    Json(input): Json<DetectChatInput>,
+) -> Response {
+    let credentials = match validate_credentials(input.bot_token, input.api_id, input.api_hash) {
+        Ok(credentials) => credentials,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(AgentError::invalid_configuration()),
+            )
+                .into_response()
+        }
+    };
+    if let Some(chat_id) = input.confirmed_chat_id.filter(|chat_id| *chat_id != 0) {
+        return Json(serde_json::json!({ "chat_id": chat_id, "confirmed": true })).into_response();
+    }
+    let endpoint = match state.start_onboarding_bot_api(&credentials) {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(AgentError::local_server_unavailable()),
+            )
+                .into_response()
+        }
+    };
+    let Some(challenge) = input.challenge else {
+        return Json(serde_json::json!({ "challenge": new_challenge() })).into_response();
+    };
+    let gateway = TelegramGateway::onboarding_with_endpoint(credentials, endpoint);
+    match gateway.detect_chat(&challenge).await {
+        Ok(chat_id) => {
+            Json(serde_json::json!({ "chat_id": chat_id, "challenge": challenge })).into_response()
+        }
         Err(error) => (StatusCode::BAD_REQUEST, Json(AgentError::telegram(error))).into_response(),
     }
 }
@@ -282,9 +352,21 @@ async fn test_send(State(state): State<ApiState>, Json(input): Json<TestSendInpu
 fn job_error_response(error: JobError) -> Response {
     let (status, body) = match error {
         JobError::FileTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, AgentError::invalid_job()),
-        JobError::FileUnavailable => (StatusCode::BAD_REQUEST, AgentError::invalid_job()),
+        JobError::FileUnavailable | JobError::InvalidDisplayName => {
+            (StatusCode::BAD_REQUEST, AgentError::invalid_job())
+        }
+        JobError::StorageUnavailable => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentError::storage_unavailable(),
+        ),
         JobError::NotFound => (StatusCode::NOT_FOUND, AgentError::job_not_found()),
         JobError::NotRetryable => (StatusCode::CONFLICT, AgentError::job_not_retryable()),
     };
     (status, Json(body)).into_response()
+}
+
+fn new_challenge() -> String {
+    let mut bytes = [0_u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

@@ -17,7 +17,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["fs", "macros", "net", "process", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync"] }
 tokio-util = { version = "0.7", features = ["io"] }
 
 [dev-dependencies]

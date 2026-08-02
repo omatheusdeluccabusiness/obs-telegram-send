@@ -76,6 +76,75 @@ async fn retry_is_the_only_way_to_reupload_a_failed_job() {
         Err(JobError::NotRetryable)
     );
 
-    service.retry(&job_id).await.unwrap();
+    assert_eq!(
+        service.retry(&job_id).await.unwrap().state,
+        obs_telegram_agent::jobs::JobState::Queued
+    );
+    service.start_upload(&job_id).await.unwrap();
     assert_eq!(*gateway.uploads.lock().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn completed_jobs_do_not_persist_the_recording_path_but_failed_jobs_survive_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let service = JobService::at(FailingGateway::default(), directory.path()).unwrap();
+    let id = service
+        .enqueue(source.path().to_path_buf(), "ignored.mp4".to_owned())
+        .await
+        .unwrap();
+    service.start_upload(&id).await.unwrap();
+
+    let restored = JobService::at(FailingGateway::default(), directory.path()).unwrap();
+    assert_eq!(
+        restored.status(&id).await.unwrap().state,
+        obs_telegram_agent::jobs::JobState::Failed
+    );
+    let serialized = std::fs::read_to_string(directory.path().join("upload-jobs.json")).unwrap();
+    assert!(serialized.contains(&source.path().display().to_string()));
+}
+
+#[tokio::test]
+async fn completing_a_persisted_job_erases_its_protected_source_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let service = JobService::at(FakeGateway::default(), directory.path()).unwrap();
+    let id = service
+        .enqueue(source.path().to_path_buf(), "recording.mp4".to_owned())
+        .await
+        .unwrap();
+
+    service.start_upload(&id).await.unwrap();
+
+    let serialized = std::fs::read_to_string(directory.path().join("upload-jobs.json")).unwrap();
+    assert!(!serialized.contains(&source.path().display().to_string()));
+}
+
+#[tokio::test]
+async fn display_name_is_derived_from_the_source_basename() {
+    let gateway = FakeGateway::default();
+    let service = JobService::new(gateway);
+    let source = tempfile::NamedTempFile::with_suffix(".mp4").unwrap();
+    let id = service
+        .enqueue(source.path().to_path_buf(), "ignored.mp4".to_owned())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        service.status(&id).await.unwrap().filename,
+        source.path().file_name().unwrap().to_str().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn display_name_with_a_path_separator_is_rejected() {
+    let service = JobService::new(FakeGateway::default());
+    let source = tempfile::NamedTempFile::new().unwrap();
+
+    assert_eq!(
+        service
+            .enqueue(source.path().to_path_buf(), "../recording.mp4".to_owned())
+            .await,
+        Err(JobError::InvalidDisplayName)
+    );
 }

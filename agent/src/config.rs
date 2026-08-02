@@ -7,6 +7,12 @@ pub enum ConfigError {
     InvalidTelegramApp,
 }
 
+pub struct TelegramCredentials {
+    pub bot_token: SecretString,
+    pub api_id: u32,
+    pub api_hash: SecretString,
+}
+
 #[derive(Deserialize)]
 pub struct ConfigInput {
     pub bot_token: String,
@@ -34,8 +40,23 @@ impl From<ConfigInput> for TelegramConfig {
 }
 
 pub fn validate_config(input: ConfigInput) -> Result<TelegramConfig, ConfigError> {
-    let valid_bot_token = input
-        .bot_token
+    validate_credentials(
+        input.bot_token.clone(),
+        input.api_id,
+        input.api_hash.clone(),
+    )?;
+    if input.chat_id == 0 {
+        return Err(ConfigError::InvalidTelegramApp);
+    }
+    Ok(input.into())
+}
+
+pub fn validate_credentials(
+    bot_token: String,
+    api_id: u32,
+    api_hash: String,
+) -> Result<TelegramCredentials, ConfigError> {
+    let valid_bot_token = bot_token
         .split_once(':')
         .is_some_and(|(identifier, suffix)| {
             !identifier.is_empty()
@@ -47,10 +68,13 @@ pub fn validate_config(input: ConfigInput) -> Result<TelegramConfig, ConfigError
     }
 
     let valid_api_hash =
-        input.api_hash.len() == 32 && input.api_hash.bytes().all(|byte| byte.is_ascii_hexdigit());
-    if input.api_id == 0 || input.chat_id == 0 || !valid_api_hash {
+        api_hash.len() == 32 && api_hash.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if api_id == 0 || !valid_api_hash {
         return Err(ConfigError::InvalidTelegramApp);
     }
-
-    Ok(input.into())
+    Ok(TelegramCredentials {
+        bot_token: SecretString::from(bot_token),
+        api_id,
+        api_hash: SecretString::from(api_hash),
+    })
 }

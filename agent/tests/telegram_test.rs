@@ -6,7 +6,7 @@ use axum::{
 };
 use obs_telegram_agent::{
     config::{validate_config, ConfigInput},
-    telegram::TelegramGateway,
+    telegram::{LocalBotApiServer, TelegramGateway},
 };
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -64,4 +64,43 @@ async fn fake_local_endpoint_receives_video_for_mp4_and_document_for_other_files
         *methods.lock().unwrap(),
         vec!["/bot123:token/sendVideo", "/bot123:token/sendDocument"]
     );
+}
+
+#[test]
+fn local_bot_api_arguments_force_an_isolated_loopback_listener() {
+    let arguments = LocalBotApiServer::command_arguments(41723);
+
+    assert!(arguments
+        .windows(2)
+        .any(|pair| pair == ["--http-ip-address", "127.0.0.1"]));
+    assert!(arguments
+        .windows(2)
+        .any(|pair| pair == ["--http-port", "41723"]));
+}
+
+#[tokio::test]
+async fn chat_detection_ignores_an_unrelated_newer_update_without_its_start_nonce() {
+    let config = validate_config(ConfigInput {
+        bot_token: "123:token".to_owned(),
+        api_id: 123,
+        api_hash: "0123456789abcdef0123456789abcdef".to_owned(),
+        chat_id: -10012345,
+    })
+    .unwrap();
+    let app = Router::new().route(
+        "/bot123:token/getUpdates",
+        get(|| async {
+            Json(json!({"ok": true, "result": [
+                {"message": {"text": "/start accepted", "chat": {"id": 42}}},
+                {"message": {"text": "/start unrelated", "chat": {"id": 99}}}
+            ]}))
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let gateway = TelegramGateway::with_endpoint(config, format!("http://{address}"));
+
+    assert_eq!(gateway.detect_chat_for_nonce("accepted").await.unwrap(), 42);
+    assert!(gateway.detect_chat_for_nonce("missing").await.is_err());
 }
