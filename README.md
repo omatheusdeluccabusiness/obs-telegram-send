@@ -32,15 +32,21 @@ e a solução de problemas em [docs/troubleshooting-pt-BR.md](docs/troubleshooti
 - O envio é para um chat escolhido por você. Não há nuvem, conta, banco de
   dados remoto ou envio automático do produto.
 
-## Instalação local do pacote
+## Pacotes: desenvolvimento e release
 
-Baixe `OBS-Telegram-Send-macOS.pkg`, abra-o no Finder e siga o instalador. Este
-primeiro pacote é **unsigned no nível do .pkg** e **não é notarizado**; os
-executáveis internos recebem apenas assinatura ad-hoc. Se o macOS bloquear a
-abertura, use a orientação de Segurança e Privacidade descrita no onboarding.
+`--development` gera `OBS-Telegram-Send-macOS-development.pkg`: ele é unsigned
+no nível do `.pkg`, usa assinatura ad-hoc nos binários e é marcado **não
+publicável**. Serve apenas para validação local.
 
-Após instalar, encerre e abra o OBS (ou encerre e entre novamente na sessão do
-macOS), abra **Ferramentas → Telegram Send** e siga o assistente.
+`--release` só gera `OBS-Telegram-Send-macOS.pkg` com Developer ID Application,
+Developer ID Installer e perfil do `notarytool`; o script assina, notariza,
+stapla e falha se algum requisito ou screenshot de release estiver ausente.
+Não publique, compartilhe com clientes ou chame de release o pacote de
+desenvolvimento.
+
+Após uma instalação, o postinstall registra o LaunchAgent para o usuário que
+está na tela e tenta iniciar somente o agente. Se não houver sessão gráfica, o
+log do sistema orienta a encerrar e entrar novamente no macOS.
 
 ## Construir o pacote
 
@@ -51,9 +57,9 @@ o repositório: informe uma cópia local no momento do empacotamento.
 ```sh
 cmake --build build --target obs-telegram-send
 cargo build --manifest-path agent/Cargo.toml --release
-bash installer/macos/build-package.sh \
+bash installer/macos/build-package.sh --development \
   --telegram-bot-api /caminho/para/telegram-bot-api
-pkgutil --check-signature dist/OBS-Telegram-Send-macOS.pkg
+pkgutil --check-signature dist/OBS-Telegram-Send-macOS-development.pkg
 ```
 
 `--plugin`, `--agent` e as variáveis `OBS_TELEGRAM_PLUGIN_PATH`,
@@ -62,7 +68,9 @@ artefatos diferentes. O script falha se qualquer executável não for arm64 e
 gera `dist/OBS-Telegram-Send-macOS.pkg`. Para desenvolvimento fora do pacote,
 `OBS_TELEGRAM_BOT_API_PATH` também pode indicar temporariamente o binário
 oficial; em uma instalação normal o agente usa sempre o caminho empacotado,
-sem consultar o `PATH`.
+sem consultar o `PATH`. Para `--release`, informe os três dados de assinatura
+por flags ou pelas variáveis `OBS_TELEGRAM_DEVELOPER_ID_APPLICATION`,
+`OBS_TELEGRAM_DEVELOPER_ID_INSTALLER` e `OBS_TELEGRAM_NOTARY_PROFILE`.
 
 ## Desenvolvimento e validação
 

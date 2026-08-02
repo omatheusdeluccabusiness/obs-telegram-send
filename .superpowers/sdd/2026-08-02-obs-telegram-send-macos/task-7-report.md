@@ -2,17 +2,22 @@
 
 ## Entregue
 
-- `installer/macos/build-package.sh` cria um payload arm64 determinístico e
-  `dist/OBS-Telegram-Send-macOS.pkg`; a origem oficial de `telegram-bot-api` é
-  obrigatória via `--telegram-bot-api` ou `OBS_TELEGRAM_BOT_API_PATH` e não é
-  versionada.
+- `installer/macos/build-package.sh` exige um modo explícito. `--development`
+  cria `dist/OBS-Telegram-Send-macOS-development.pkg`, unsigned e ad-hoc,
+  marcado não-publicável. `--release` só cria
+  `dist/OBS-Telegram-Send-macOS.pkg` após exigir Developer ID Application,
+  Developer ID Installer e perfil notarytool, assina com hardened runtime e
+  timestamp, depois executa productsign, notarytool, staple e spctl.
+- A origem oficial de `telegram-bot-api` é obrigatória via `--telegram-bot-api`
+  ou `OBS_TELEGRAM_BOT_API_PATH` e não é versionada.
 - O payload contém o plugin em
   `/Library/Application Support/obs-studio/plugins/obs-telegram-send.plugin`,
   e agente mais servidor em `/Library/Application Support/OBS-Telegram-Send/`.
 - O LaunchAgent instalado em `/Library/LaunchAgents/` chama apenas
-  `obs-telegram-agent`. Não há scripts preinstall/postinstall: copiar o plist é
-  suficiente para registrá-lo para a próxima sessão, sem executar ações como
-  root no usuário errado.
+  `obs-telegram-agent`. O `postinstall` usa o usuário/UID do console, faz
+  `bootout` tolerante, `bootstrap gui/<uid>` e `kickstart`; sem sessão gráfica,
+  registra fallback claro pelo logger para relogin. Ele nunca usa o HOME do
+  root e não inicializa o servidor Telegram diretamente.
 - O bearer é criado pelo agente no primeiro início em Application Support do
   usuário, e a configuração continua no Keychain. Nenhuma credencial é gerada
   ou enviada no pacote.
@@ -22,10 +27,13 @@
 - Antes de qualquer inicialização do Bot API local (onboarding, configuração
   salva ou relançamento), o agente chama `logOut` na API cloud do Telegram. O
   teste usa uma API cloud fake em loopback e não faz chamada real.
-- Onboarding e troubleshooting PT-BR foram escritos para cliente leigo, com
-  placeholders explícitos para screenshots reais pendentes. O uninstall remove
-  apenas os três alvos de sistema documentados e preserva gravações, Keychain e
-  estado do usuário até limpeza manual explícita.
+- Onboarding e troubleshooting PT-BR foram escritos para cliente leigo, com os
+  quatro paths reais de screenshot que o controlador deve capturar. O release
+  é bloqueado enquanto faltarem. O uninstall remove apenas os três alvos de
+  sistema documentados e preserva gravações, Keychain e estado do usuário até
+  limpeza manual explícita.
+- `release-gate.sh` bloqueia sidecars AppleDouble `._*` em release. Em
+  development, mostra o aviso explícito de não-publicável sem maquiar o payload.
 
 ## TDD e verificação
 
@@ -48,6 +56,14 @@
    `pkgutil --check-signature` retorna `Status: no signature`, que é esperado:
    o `.pkg` é unsigned; executáveis internos recebem assinatura ad-hoc. Não há
    alegação de Developer ID nem notarização.
+8. `postinstall-test.sh` usa dry-run/mocks não destrutivos para verificar
+   bootout, bootstrap e kickstart no UID do console e o fallback sem sessão.
+   `package-layout-test.sh` expande o `.pkg` e confirma que `Scripts/postinstall`
+   foi realmente embutido.
+9. `release-gate-test.sh` confirma que sidecars falham em release mas só avisam
+   em development; `release-assets-test.sh` confirma que screenshots ausentes
+   bloqueiam release e não bloqueiam o build local. O modo release sem
+   identidades falha fechada antes de montar payload.
 
 ## Self-review e preocupações reais
 
@@ -62,6 +78,13 @@
   destinos exigidos estão presentes, mas a pipeline de release deve construir
   fora desse ambiente instrumentado ou remover a fonte dessa xattr para evitar
   sidecars supérfluos.
+- `security find-identity` confirmou **0 identidades válidas** tanto para
+  codesigning quanto para installer. Portanto não há release/notarização neste
+  ambiente; o modo release falha fechada, como previsto.
+- As quatro screenshots reais ainda não existem. O pacote development foi
+  construído para inspeção, mas está explicitamente marcado não-publicável;
+  capture as imagens nos paths de `docs/images/macos/README.md` antes de tentar
+  uma release.
 - A flakiness observada em `agent/tests/install_bearer_test.rs` tinha origem no
   helper de teste que apenas calculava nomes com `SystemTime::now().as_nanos()`
   sem reservar o diretório; testes paralelos podiam compartilhar/remover o

@@ -1,8 +1,10 @@
 # Solução de problemas — OBS Telegram Send
 
-> **Capturas de tela pendentes antes do lançamento:** adicionar somente
-> capturas reais do OBS e do instalador depois da validação manual. Esta versão
-> não usa imagens fictícias.
+> **Capturas de tela pendentes antes do lançamento:** o verificador de release
+> exige as imagens reais em `images/macos/01-installer.pkg.png`,
+> `images/macos/02-tools-menu.png`, `images/macos/03-onboarding.png` e
+> `images/macos/04-send-confirmation.png`. Esta versão não usa imagens
+> fictícias.
 
 ## O menu “Telegram Send” não aparece no OBS
 
@@ -14,12 +16,14 @@
 Não mova manualmente a pasta do plugin: ela é instalada em
 `/Library/Application Support/obs-studio/plugins/obs-telegram-send.plugin`.
 
-## O macOS bloqueia o instalador
+## O macOS bloqueia o instalador de desenvolvimento
 
-O `.pkg` de desenvolvimento/release local não é notarizado e não possui
-assinatura Developer ID. Em **Ajustes do Sistema → Privacidade e Segurança**,
-use **Abrir Mesmo Assim** apenas depois de confirmar a origem da release. Não
-há alegação de notarização para este pacote.
+O arquivo `OBS-Telegram-Send-macOS-development.pkg` é unsigned e não
+notarizado. Ele é somente para testes locais, nunca para distribuição. Em
+**Ajustes do Sistema → Privacidade e Segurança**, use **Abrir Mesmo Assim**
+somente depois de confirmar que você mesmo gerou o pacote local. Uma release
+pública precisa vir assinada e notarizada; se ela for bloqueada, não a contorne
+antes de confirmar a origem e comunicar o suporte.
 
 ## “Detectar meu chat” não encontra nada
 

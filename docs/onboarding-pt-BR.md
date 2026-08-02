@@ -3,27 +3,32 @@
 Este guia conecta o OBS ao **seu próprio** chat do Telegram. Reserve alguns
 minutos e mantenha o OBS aberto. Você não precisa usar Terminal.
 
-> **Capturas de tela pendentes antes do lançamento:** este documento precisa
-> receber imagens reais do produto instalado: (1) instalador macOS, (2) menu
-> Ferramentas → Telegram Send, (3) cada etapa do assistente e (4) janela de
-> confirmação da gravação. Não há imagens ilustrativas ou inventadas nesta
-> versão.
+> **Capturas de tela pendentes antes do lançamento:** o pacote de release é
+> bloqueado até que o controlador substitua os placeholders por capturas reais
+> nestes caminhos: `images/macos/01-installer.pkg.png`,
+> `images/macos/02-tools-menu.png`, `images/macos/03-onboarding.png` e
+> `images/macos/04-send-confirmation.png`. Não há imagens ilustrativas ou
+> inventadas nesta versão.
 
 ## 1. Instale o pacote
 
 1. Baixe `OBS-Telegram-Send-macOS.pkg` da release confiável.
 2. Dê dois cliques no arquivo e escolha **Continuar** e **Instalar**. O macOS
    pode pedir a senha de administrador do computador.
-3. Este pacote inicial não é notarizado. Se o macOS avisar que não pode abrir,
-   abra **Ajustes do Sistema → Privacidade e Segurança**, localize o aviso do
-   instalador e escolha **Abrir Mesmo Assim**. Confirme apenas se o arquivo foi
-   obtido da release confiável.
+3. Uma release pública é assinada e notarizada. Se houver um aviso de segurança
+   nela, pare e confira a origem da release antes de continuar.
 4. Feche e abra o OBS. Se o menu ainda não aparecer, encerre e entre novamente
    na sua conta do macOS e abra o OBS outra vez.
 
 O instalador adiciona o plugin e deixa um pequeno serviço local registrado para
 a sua sessão. Ele não envia gravações, não pede tokens e não acessa a internet
 automaticamente.
+
+> Para desenvolvimento local, existe um pacote separado chamado
+> `OBS-Telegram-Send-macOS-development.pkg`. Ele é unsigned/não notarizado e
+> **não é para clientes nem publicação**. Só nessa situação de desenvolvimento,
+> após confirmar a origem local, use Ajustes do Sistema → Privacidade e
+> Segurança → **Abrir Mesmo Assim**.
 
 ## 2. Abra o assistente no OBS
 
