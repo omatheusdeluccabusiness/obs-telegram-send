@@ -30,18 +30,23 @@ struct ApiState {
 impl Default for ApiState {
     fn default() -> Self {
         let local_bot_api = Arc::new(Mutex::new(None));
-        let gateway = TelegramGateway::from_keychain_with_server(local_bot_api.clone());
-        let jobs = JobService::in_app_support(gateway.clone())
-            .expect("agent must access its protected local upload-job store");
-        Self {
-            gateway,
-            jobs,
-            local_bot_api,
-        }
+        Self::with_shared_server(local_bot_api)
     }
 }
 
 impl ApiState {
+    fn with_shared_server(local_bot_api: Arc<Mutex<Option<LocalBotApiServer>>>) -> Self {
+        let gateway = TelegramGateway::from_keychain_with_server(Arc::clone(&local_bot_api));
+        let jobs = JobService::in_app_support(gateway.clone())
+            .expect("agent must access its protected local upload-job store");
+        let state = Self {
+            gateway,
+            jobs,
+            local_bot_api,
+        };
+        debug_assert!(state.gateway.uses_server_handle(&state.local_bot_api));
+        state
+    }
     fn start_local_bot_api(
         &self,
         configuration: &crate::config::TelegramConfig,
@@ -162,10 +167,7 @@ pub fn router_with_local_bot_api(
     install_secret: String,
     local_bot_api: Option<LocalBotApiServer>,
 ) -> Router {
-    let state = ApiState {
-        local_bot_api: Arc::new(Mutex::new(local_bot_api)),
-        ..ApiState::default()
-    };
+    let state = ApiState::with_shared_server(Arc::new(Mutex::new(local_bot_api)));
     router_with_state(install_secret, state)
 }
 

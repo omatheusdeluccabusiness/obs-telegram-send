@@ -112,6 +112,13 @@ impl TelegramGateway {
         }
     }
 
+    pub fn uses_server_handle(
+        &self,
+        server: &std::sync::Arc<std::sync::Mutex<Option<LocalBotApiServer>>>,
+    ) -> bool {
+        matches!(&self.endpoint, EndpointSource::Managed(owned) if std::sync::Arc::ptr_eq(owned, server))
+    }
+
     pub async fn detect_chat_for_nonce(&self, nonce: &str) -> Result<i64, TelegramError> {
         let response = self
             .client
@@ -328,8 +335,32 @@ impl LocalBotApiServer {
             &SocketAddr::from((Ipv4Addr::LOCALHOST, self.port)),
             Duration::from_millis(100),
         )
-        .map(|_| ())
-        .map_err(|_| TelegramError::RequestFailed)
+        .map_err(|_| TelegramError::RequestFailed)?;
+        let output = Command::new("lsof")
+            .arg("-nP")
+            .arg(format!("-iTCP:{}", self.port))
+            .arg("-sTCP:LISTEN")
+            .arg("-Fp")
+            .output()
+            .map_err(|_| TelegramError::RequestFailed)?;
+        if !output.status.success()
+            || !Self::listener_is_owned_by(
+                self.child.id(),
+                &String::from_utf8_lossy(&output.stdout),
+            )
+        {
+            return Err(TelegramError::RequestFailed);
+        }
+        Ok(())
+    }
+
+    pub fn listener_is_owned_by(child_pid: u32, lsof_output: &str) -> bool {
+        let pids: Vec<u32> = lsof_output
+            .lines()
+            .filter_map(|line| line.strip_prefix('p'))
+            .filter_map(|pid| pid.parse::<u32>().ok())
+            .collect();
+        !pids.is_empty() && pids.into_iter().all(|pid| pid == child_pid)
     }
 
     fn wait_until_ready(&mut self) -> Result<(), TelegramError> {

@@ -104,3 +104,21 @@ async fn chat_detection_ignores_an_unrelated_newer_update_without_its_start_nonc
     assert_eq!(gateway.detect_chat_for_nonce("accepted").await.unwrap(), 42);
     assert!(gateway.detect_chat_for_nonce("missing").await.is_err());
 }
+
+#[test]
+fn managed_gateway_keeps_the_exact_server_handle_it_was_given() {
+    let server = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let gateway = TelegramGateway::from_keychain_with_server(server.clone());
+
+    assert!(gateway.uses_server_handle(&server));
+}
+
+#[test]
+fn only_the_child_process_id_is_accepted_as_the_loopback_listener_owner() {
+    assert!(LocalBotApiServer::listener_is_owned_by(4242, "p4242\n"));
+    assert!(!LocalBotApiServer::listener_is_owned_by(4242, "p9999\n"));
+    assert!(!LocalBotApiServer::listener_is_owned_by(
+        4242,
+        "p4242\np9999\n"
+    ));
+}

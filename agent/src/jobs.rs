@@ -35,6 +35,7 @@ pub enum JobState {
     Uploading,
     Completed,
     Failed,
+    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,11 +86,20 @@ impl JobStore {
         let mut jobs: HashMap<JobId, Job> =
             serde_json::from_str(&serialized).map_err(|_| JobError::StorageUnavailable)?;
         for job in jobs.values_mut() {
-            if job.status.state == JobState::Uploading {
+            if job.status.state == JobState::Queued {
                 job.status.state = JobState::Failed;
-                job.status.retryable_error = Some("Upload was interrupted. Try again.".to_owned());
+                job.status.retryable_error =
+                    Some("Agent restarted before upload. Try again.".to_owned());
             }
-            if job.status.state == JobState::Completed {
+            if job.status.state == JobState::Uploading {
+                job.status.state = JobState::Unknown;
+                job.status.retryable_error = Some(
+                    "Telegram may have received this recording. Verify before sending again."
+                        .to_owned(),
+                );
+                job.recording_path = None;
+            }
+            if matches!(job.status.state, JobState::Completed | JobState::Unknown) {
                 job.recording_path = None;
             }
         }
@@ -233,13 +243,24 @@ impl<G: TelegramClient> JobService<G> {
             let display_name = job.status.filename.clone();
             (path, display_name)
         };
-        self.store.save(&self.jobs.lock().unwrap())?;
+        if self.store.save(&self.jobs.lock().unwrap()).is_err() {
+            let mut jobs = self.jobs.lock().unwrap();
+            if let Some(job) = jobs.get_mut(job_id) {
+                job.status.state = JobState::Failed;
+                job.status.retryable_error = Some(
+                    "Upload could not be started safely. Try again after storage is available."
+                        .to_owned(),
+                );
+            }
+            return Err(JobError::StorageUnavailable);
+        }
 
         let result = self.gateway.upload_file(path, display_name).await;
         let mut jobs = self.jobs.lock().unwrap();
         let Some(job) = jobs.get_mut(job_id) else {
             return Ok(());
         };
+        let remote_success = result.is_ok();
         match result {
             Ok(()) => {
                 job.status.state = JobState::Completed;
@@ -251,7 +272,21 @@ impl<G: TelegramClient> JobService<G> {
                 job.status.retryable_error = Some("Telegram upload failed. Try again.".to_owned());
             }
         }
-        self.store.save(&jobs)
+        if self.store.save(&jobs).is_err() {
+            if remote_success {
+                let job = jobs
+                    .get_mut(job_id)
+                    .expect("job is retained while uploading");
+                job.status.state = JobState::Unknown;
+                job.status.retryable_error = Some(
+                    "Telegram may have received this recording. Verify before sending again."
+                        .to_owned(),
+                );
+                job.recording_path = None;
+            }
+            return Err(JobError::StorageUnavailable);
+        }
+        Ok(())
     }
 
     // Marks a failed job pollable as queued. The route starts it in a separate task.

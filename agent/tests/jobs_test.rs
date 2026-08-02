@@ -19,6 +19,11 @@ struct FailingGateway {
     uploads: Arc<Mutex<usize>>,
 }
 
+#[derive(Clone)]
+struct PersistBlockingGateway {
+    directory: PathBuf,
+}
+
 impl FakeGateway {
     fn uploads(&self) -> Vec<(PathBuf, String)> {
         self.uploads.lock().unwrap().clone()
@@ -38,6 +43,17 @@ impl TelegramClient for FailingGateway {
     async fn upload_file(&self, _path: PathBuf, _display_name: String) -> Result<(), String> {
         *self.uploads.lock().unwrap() += 1;
         Err("network unavailable".to_owned())
+    }
+}
+
+#[async_trait]
+impl TelegramClient for PersistBlockingGateway {
+    async fn upload_file(&self, _path: PathBuf, _display_name: String) -> Result<(), String> {
+        std::fs::set_permissions(
+            &self.directory,
+            std::os::unix::fs::PermissionsExt::from_mode(0o500),
+        )
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -118,6 +134,77 @@ async fn completing_a_persisted_job_erases_its_protected_source_path() {
 
     let serialized = std::fs::read_to_string(directory.path().join("upload-jobs.json")).unwrap();
     assert!(!serialized.contains(&source.path().display().to_string()));
+}
+
+#[tokio::test]
+async fn queued_jobs_restored_after_a_crash_become_manually_retryable_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let service = JobService::at(FakeGateway::default(), directory.path()).unwrap();
+    let id = service
+        .enqueue(source.path().to_path_buf(), "recording.mp4".to_owned())
+        .await
+        .unwrap();
+
+    let restored = JobService::at(FakeGateway::default(), directory.path()).unwrap();
+    assert_eq!(
+        restored.status(&id).await.unwrap().state,
+        obs_telegram_agent::jobs::JobState::Failed
+    );
+}
+
+#[tokio::test]
+async fn a_persist_failure_before_upload_leaves_a_pollable_failed_job_without_calling_telegram() {
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::default();
+    let service = JobService::at(gateway.clone(), directory.path()).unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let id = service
+        .enqueue(source.path().to_path_buf(), "recording.mp4".to_owned())
+        .await
+        .unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o500),
+    )
+    .unwrap();
+
+    assert_eq!(
+        service.start_upload(&id).await,
+        Err(JobError::StorageUnavailable)
+    );
+    assert_eq!(
+        service.status(&id).await.unwrap().state,
+        obs_telegram_agent::jobs::JobState::Failed
+    );
+    assert!(gateway.uploads().is_empty());
+}
+
+#[tokio::test]
+async fn a_completion_persist_failure_marks_the_job_unknown_and_never_retryable() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = JobService::at(
+        PersistBlockingGateway {
+            directory: directory.path().to_path_buf(),
+        },
+        directory.path(),
+    )
+    .unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let id = service
+        .enqueue(source.path().to_path_buf(), "recording.mp4".to_owned())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        service.start_upload(&id).await,
+        Err(JobError::StorageUnavailable)
+    );
+    assert_eq!(
+        service.status(&id).await.unwrap().state,
+        obs_telegram_agent::jobs::JobState::Unknown
+    );
+    assert_eq!(service.retry(&id).await, Err(JobError::NotRetryable));
 }
 
 #[tokio::test]
