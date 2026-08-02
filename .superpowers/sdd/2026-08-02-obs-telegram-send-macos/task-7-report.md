@@ -33,7 +33,13 @@
   sistema documentados e preserva gravações, Keychain e estado do usuário até
   limpeza manual explícita.
 - `release-gate.sh` bloqueia sidecars AppleDouble `._*` em release. Em
-  development, mostra o aviso explícito de não-publicável sem maquiar o payload.
+  development, mostra o aviso explícito de não-publicável sem maquiar o pacote.
+  O gate expande o `.pkg`, portanto rejeita sidecars no payload, em Scripts e
+  nos metadados internos.
+- Após `pkgbuild`, release executa o gate no pacote unsigned antes de
+  productsign/notary. O pacote final só é movido para o nome público depois de
+  signing, gate, notarização, staple, spctl e layout passarem; um trap remove
+  apenas os dois intermediários explícitos em qualquer falha.
 
 ## TDD e verificação
 
@@ -64,6 +70,10 @@
    em development; `release-assets-test.sh` confirma que screenshots ausentes
    bloqueiam release e não bloqueiam o build local. O modo release sem
    identidades falha fechada antes de montar payload.
+10. O teste do gate injeta `Scripts/._postinstall` apenas no pacote expandido:
+    development avisa e release falha. Ele também confirma por ordem que o gate
+    unsigned ocorre entre pkgbuild e productsign, e que a publicação final só
+    ocorre depois das validações do pacote assinado.
 
 ## Self-review e preocupações reais
 

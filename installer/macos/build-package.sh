@@ -80,13 +80,29 @@ launch_agent_destination="$payload_root/Library/LaunchAgents"
 scripts_dir="$root_dir/installer/macos/scripts"
 if [[ "$mode" == 'release' ]]; then
   package_path="$dist_dir/OBS-Telegram-Send-macOS.pkg"
-  unsigned_package="$dist_dir/OBS-Telegram-Send-macOS-unsigned.pkg"
+  unsigned_package="$dist_dir/.OBS-Telegram-Send-macOS-unsigned.pkg"
+  signed_package="$dist_dir/.OBS-Telegram-Send-macOS-signed.pkg"
 else
   package_path="$dist_dir/OBS-Telegram-Send-macOS-development.pkg"
   unsigned_package="$package_path"
+  signed_package=''
 fi
 
-rm -rf "$payload_root" "$unsigned_package" "$package_path"
+cleanup_release_artifacts() {
+  if [[ "$mode" == 'release' ]]; then
+    rm -f -- "$unsigned_package" "$signed_package"
+  fi
+}
+if [[ "$mode" == 'release' ]]; then
+  trap cleanup_release_artifacts EXIT
+fi
+
+rm -rf "$payload_root"
+if [[ "$mode" == 'release' ]]; then
+  rm -f -- "$unsigned_package" "$signed_package"
+else
+  rm -f -- "$package_path"
+fi
 mkdir -p "$plugin_destination" "$service_destination" "$launch_agent_destination"
 ditto --norsrc --noextattr --noqtn --noacl \
   "$plugin_source" "$plugin_destination/obs-telegram-send.plugin"
@@ -119,15 +135,20 @@ pkgbuild \
   "$unsigned_package"
 
 if [[ "$mode" == 'release' ]]; then
-  productsign --sign "$developer_id_installer" "$unsigned_package" "$package_path"
-  rm -f "$unsigned_package"
-  xcrun notarytool submit "$package_path" --keychain-profile "$notary_profile" --wait
-  xcrun stapler staple "$package_path"
-  spctl --assess --type install --verbose=4 "$package_path"
+  "$root_dir/installer/macos/release-gate.sh" --release "$unsigned_package"
+  productsign --sign "$developer_id_installer" "$unsigned_package" "$signed_package"
+  "$root_dir/installer/macos/release-gate.sh" --release "$signed_package"
+  xcrun notarytool submit "$signed_package" --keychain-profile "$notary_profile" --wait
+  xcrun stapler staple "$signed_package"
+  spctl --assess --type install --verbose=4 "$signed_package"
+  bash "$root_dir/installer/macos/package-layout-test.sh" "$signed_package"
+  mv -f "$signed_package" "$package_path"
+  rm -f -- "$unsigned_package"
+else
+  "$root_dir/installer/macos/release-gate.sh" --development "$package_path"
+  bash "$root_dir/installer/macos/package-layout-test.sh" "$package_path"
 fi
 
-"$root_dir/installer/macos/release-gate.sh" "--$mode" "$package_path"
-bash "$root_dir/installer/macos/package-layout-test.sh" "$package_path"
 if [[ "$mode" == 'development' ]]; then
   printf 'DEVELOPMENT ONLY — não publicável, sem Developer ID nem notarização: %s\n' "$package_path"
 else
