@@ -59,7 +59,7 @@
    com o fake em loopback.
 3. O teste do caminho empacotado inicialmente não compilou porque
    `packaged_executable_path` não existia; passa sem depender do `PATH`.
-4. `cargo test --manifest-path agent/Cargo.toml`: 43 testes passaram na rodada
+4. `cargo test --manifest-path agent/Cargo.toml`: 45 testes passaram na rodada
    completa final. `bash -n`, `plutil -lint` e `git diff --check` passaram.
 5. `cargo build --manifest-path agent/Cargo.toml --release` gerou o agente
    arm64 usado no pacote. O plugin arm64 já compilado em `build/` foi usado.
@@ -99,6 +99,13 @@
     migração/start e o mesmo endpoint publicado. `ApiState` mantém um mutex
     assíncrono adquirido durante toda a checagem, start e publicação; nenhum
     `std::sync::Mutex` permanece adquirido através de `await`.
+14. TDD de identidade: os testes inicialmente não compilaram porque o estado
+    `Ready` não carregava fingerprint e `ensure_server_for` não existia. Agora o
+    child é identificado somente por SHA-256 em memória de `api_id + api_hash`.
+    Token novo com as mesmas app credentials reutiliza o child, mas executa sua
+    própria migração e `getMe`; app credentials diferentes derrubam exatamente
+    o child anterior e iniciam um novo uma única vez. Tokens e hashes crus não
+    são persistidos nem registrados.
 
 ## Self-review e preocupações reais
 

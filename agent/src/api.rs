@@ -24,8 +24,8 @@ type LocalJobs = JobService<TelegramGateway>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalBotApiStartState {
     Stopped,
-    Starting,
-    Ready,
+    Starting([u8; 32]),
+    Ready([u8; 32]),
 }
 
 #[derive(Clone)]
@@ -45,11 +45,6 @@ impl Default for ApiState {
 
 impl ApiState {
     fn with_shared_server(local_bot_api: Arc<Mutex<Option<LocalBotApiServer>>>) -> Self {
-        let initial_start_state = if local_bot_api.lock().unwrap().is_some() {
-            LocalBotApiStartState::Ready
-        } else {
-            LocalBotApiStartState::Stopped
-        };
         let gateway = TelegramGateway::from_keychain_with_server(Arc::clone(&local_bot_api));
         let jobs = JobService::in_app_support(gateway.clone())
             .expect("agent must access its protected local upload-job store");
@@ -57,7 +52,7 @@ impl ApiState {
             gateway,
             jobs,
             local_bot_api,
-            local_bot_api_start: Arc::new(tokio::sync::Mutex::new(initial_start_state)),
+            local_bot_api_start: Arc::new(tokio::sync::Mutex::new(LocalBotApiStartState::Stopped)),
         };
         debug_assert!(state.gateway.uses_server_handle(&state.local_bot_api));
         state
@@ -66,49 +61,117 @@ impl ApiState {
         &self,
         configuration: &crate::config::TelegramConfig,
     ) -> Result<(), TelegramError> {
-        start_once(&self.local_bot_api_start, &self.local_bot_api, || {
-            LocalBotApiServer::start_after_cloud_logout(configuration, 0)
-        })
+        let fingerprint = LocalBotApiServer::app_credentials_fingerprint(
+            configuration.api_id,
+            &configuration.api_hash,
+        );
+        ensure_server_for(
+            &self.local_bot_api_start,
+            &self.local_bot_api,
+            fingerprint,
+            || LocalBotApiServer::start_after_cloud_logout(configuration, 0),
+            ready_endpoint,
+            |endpoint| async move {
+                LocalBotApiServer::validate_config_after_cloud_logout(configuration, &endpoint)
+                    .await
+            },
+        )
         .await
+        .map(|_| ())
     }
 
     async fn start_onboarding_bot_api(
         &self,
         credentials: &TelegramCredentials,
     ) -> Result<String, TelegramError> {
-        start_once(&self.local_bot_api_start, &self.local_bot_api, || {
-            LocalBotApiServer::start_onboarding_after_cloud_logout(credentials, 0)
-        })
-        .await?;
-        let mut server = self
-            .local_bot_api
-            .lock()
-            .map_err(|_| TelegramError::RequestFailed)?;
-        let server = server.as_mut().ok_or(TelegramError::RequestFailed)?;
-        server.ensure_ready()?;
-        Ok(server.endpoint())
+        let fingerprint = LocalBotApiServer::app_credentials_fingerprint(
+            credentials.api_id,
+            &credentials.api_hash,
+        );
+        ensure_server_for(
+            &self.local_bot_api_start,
+            &self.local_bot_api,
+            fingerprint,
+            || LocalBotApiServer::start_onboarding_after_cloud_logout(credentials, 0),
+            ready_endpoint,
+            |endpoint| async move {
+                LocalBotApiServer::validate_onboarding_after_cloud_logout(credentials, &endpoint)
+                    .await
+            },
+        )
+        .await
     }
 }
 
-async fn start_once<T, Start, StartFuture>(
+fn ready_endpoint(server: &mut LocalBotApiServer) -> Result<String, TelegramError> {
+    server.ensure_ready()?;
+    Ok(server.endpoint())
+}
+
+async fn ensure_server_for<T, Start, StartFuture, Endpoint, Validate, ValidateFuture>(
     start_state: &tokio::sync::Mutex<LocalBotApiStartState>,
     server: &Mutex<Option<T>>,
+    fingerprint: [u8; 32],
     start: Start,
-) -> Result<(), TelegramError>
+    endpoint: Endpoint,
+    validate_existing: Validate,
+) -> Result<String, TelegramError>
 where
     Start: FnOnce() -> StartFuture,
     StartFuture: Future<Output = Result<T, TelegramError>>,
+    Endpoint: Fn(&mut T) -> Result<String, TelegramError>,
+    Validate: FnOnce(String) -> ValidateFuture,
+    ValidateFuture: Future<Output = Result<(), TelegramError>>,
 {
     let mut state = start_state.lock().await;
-    if *state == LocalBotApiStartState::Ready {
-        return Ok(());
+    if *state == LocalBotApiStartState::Ready(fingerprint) {
+        let endpoint_result = match server.lock() {
+            Ok(mut server) => server
+                .as_mut()
+                .ok_or(TelegramError::RequestFailed)
+                .and_then(&endpoint),
+            Err(_) => Err(TelegramError::RequestFailed),
+        };
+        let existing_endpoint = match endpoint_result {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                *state = LocalBotApiStartState::Stopped;
+                let failed = server
+                    .lock()
+                    .map_err(|_| TelegramError::RequestFailed)?
+                    .take();
+                drop(failed);
+                return Err(error);
+            }
+        };
+        validate_existing(existing_endpoint.clone()).await?;
+        return Ok(existing_endpoint);
     }
-    *state = LocalBotApiStartState::Starting;
+    *state = LocalBotApiStartState::Starting(fingerprint);
+    let previous = server
+        .lock()
+        .map_err(|_| TelegramError::RequestFailed)?
+        .take();
+    drop(previous);
     match start().await {
-        Ok(candidate) => {
-            *server.lock().map_err(|_| TelegramError::RequestFailed)? = Some(candidate);
-            *state = LocalBotApiStartState::Ready;
-            Ok(())
+        Ok(mut candidate) => {
+            let candidate_endpoint = match endpoint(&mut candidate) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    *state = LocalBotApiStartState::Stopped;
+                    return Err(error);
+                }
+            };
+            let mut server = match server.lock() {
+                Ok(server) => server,
+                Err(_) => {
+                    *state = LocalBotApiStartState::Stopped;
+                    return Err(TelegramError::RequestFailed);
+                }
+            };
+            *server = Some(candidate);
+            *state = LocalBotApiStartState::Ready(fingerprint);
+            Ok(candidate_endpoint)
         }
         Err(error) => {
             *state = LocalBotApiStartState::Stopped;
@@ -414,9 +477,91 @@ fn new_challenge() -> String {
 
 #[cfg(test)]
 mod concurrent_start_tests {
-    use super::{start_once, LocalBotApiStartState, TelegramError};
+    use super::{ensure_server_for, LocalBotApiStartState, TelegramError};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    struct FakeServer {
+        endpoint: String,
+        drops: Option<Arc<AtomicUsize>>,
+    }
+
+    impl Drop for FakeServer {
+        fn drop(&mut self) {
+            if let Some(drops) = &self.drops {
+                drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn endpoint(server: &mut FakeServer) -> Result<String, TelegramError> {
+        Ok(server.endpoint.clone())
+    }
+
+    #[tokio::test]
+    async fn a_new_token_reuses_the_child_but_runs_its_own_migration_and_validation() {
+        let fingerprint = [7; 32];
+        let state = tokio::sync::Mutex::new(LocalBotApiStartState::Ready(fingerprint));
+        let server = Mutex::new(Some(FakeServer {
+            endpoint: "http://127.0.0.1:41723".to_owned(),
+            drops: None,
+        }));
+        let starts = AtomicUsize::new(0);
+        let token_migrations = AtomicUsize::new(0);
+
+        let reused_endpoint = ensure_server_for(
+            &state,
+            &server,
+            fingerprint,
+            || async {
+                starts.fetch_add(1, Ordering::SeqCst);
+                Err::<FakeServer, _>(TelegramError::RequestFailed)
+            },
+            endpoint,
+            |_| async {
+                token_migrations.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reused_endpoint, "http://127.0.0.1:41723");
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        assert_eq!(token_migrations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn changed_app_credentials_drop_the_exact_child_and_start_once() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let state = tokio::sync::Mutex::new(LocalBotApiStartState::Ready([1; 32]));
+        let server = Mutex::new(Some(FakeServer {
+            endpoint: "http://127.0.0.1:41001".to_owned(),
+            drops: Some(Arc::clone(&drops)),
+        }));
+        let starts = AtomicUsize::new(0);
+
+        let endpoint = ensure_server_for(
+            &state,
+            &server,
+            [2; 32],
+            || async {
+                starts.fetch_add(1, Ordering::SeqCst);
+                Ok(FakeServer {
+                    endpoint: "http://127.0.0.1:41002".to_owned(),
+                    drops: None,
+                })
+            },
+            endpoint,
+            |_| async { Ok(()) },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(endpoint, "http://127.0.0.1:41002");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn concurrent_requests_share_one_completed_start() {
@@ -430,11 +575,21 @@ mod concurrent_start_tests {
             let server = Arc::clone(&server);
             let starts = Arc::clone(&starts);
             tasks.push(tokio::spawn(async move {
-                start_once(&gate, &server, || async move {
-                    starts.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                    Ok::<_, TelegramError>("http://127.0.0.1:41723".to_owned())
-                })
+                ensure_server_for(
+                    &gate,
+                    &server,
+                    [9; 32],
+                    || async move {
+                        starts.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                        Ok::<_, TelegramError>(FakeServer {
+                            endpoint: "http://127.0.0.1:41723".to_owned(),
+                            drops: None,
+                        })
+                    },
+                    endpoint,
+                    |_| async { Ok(()) },
+                )
                 .await
             }));
         }
@@ -443,9 +598,13 @@ mod concurrent_start_tests {
             task.await.unwrap().unwrap();
         }
         assert_eq!(starts.load(Ordering::SeqCst), 1);
-        assert_eq!(*gate.lock().await, LocalBotApiStartState::Ready);
+        assert_eq!(*gate.lock().await, LocalBotApiStartState::Ready([9; 32]));
         assert_eq!(
-            server.lock().unwrap().as_deref(),
+            server
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|server| server.endpoint.as_str()),
             Some("http://127.0.0.1:41723")
         );
     }

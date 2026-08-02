@@ -302,6 +302,13 @@ impl BotApiDirectories {
 }
 
 impl LocalBotApiServer {
+    pub fn app_credentials_fingerprint(api_id: u32, api_hash: &secrecy::SecretString) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(api_id.to_be_bytes());
+        digest.update(api_hash.expose_secret().as_bytes());
+        digest.finalize().into()
+    }
+
     pub fn packaged_executable_path() -> PathBuf {
         PathBuf::from(PACKAGED_BOT_API_PATH)
     }
@@ -371,6 +378,28 @@ impl LocalBotApiServer {
                 server.validate_bot(&credentials.bot_token).await?;
                 Ok(server)
             },
+        )
+        .await
+    }
+
+    pub async fn validate_config_after_cloud_logout(
+        config: &TelegramConfig,
+        endpoint: &str,
+    ) -> Result<(), TelegramError> {
+        migrate_bot_to_local(config, TELEGRAM_CLOUD_BOT_API_ENDPOINT, || async {
+            Self::validate_bot_at(&config.bot_token, endpoint).await
+        })
+        .await
+    }
+
+    pub async fn validate_onboarding_after_cloud_logout(
+        credentials: &TelegramCredentials,
+        endpoint: &str,
+    ) -> Result<(), TelegramError> {
+        migrate_bot_token_to_local(
+            &credentials.bot_token,
+            TELEGRAM_CLOUD_BOT_API_ENDPOINT,
+            || async { Self::validate_bot_at(&credentials.bot_token, endpoint).await },
         )
         .await
     }
