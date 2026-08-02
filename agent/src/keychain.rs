@@ -3,7 +3,10 @@ use serde_json::{json, Value};
 
 use crate::config::{validate_config, ConfigInput, TelegramConfig};
 
-const SERVICE_NAME: &str = "com.obs-telegram-send.agent";
+// This is the first public storage namespace. Earlier development builds used
+// an unversioned Keychain item whose ad-hoc code-signing ACL could keep a new
+// build blocked behind an obsolete authorization prompt.
+const SERVICE_NAME: &str = "com.obs-telegram-send.agent.v1";
 const ACCOUNT_NAME: &str = "telegram-configuration";
 
 pub struct SecretStore {

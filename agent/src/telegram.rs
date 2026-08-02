@@ -32,6 +32,7 @@ pub const DEFAULT_BOT_API_ENDPOINT: &str = "http://127.0.0.1:8081";
 pub const TELEGRAM_CLOUD_BOT_API_ENDPOINT: &str = "https://api.telegram.org";
 pub const PACKAGED_BOT_API_PATH: &str =
     "/Library/Application Support/OBS-Telegram-Send/telegram-bot-api";
+const BOT_API_DATA_DIRECTORY_NAME: &str = "telegram-bot-api-data";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TelegramError {
@@ -316,7 +317,10 @@ impl LocalBotApiServer {
     pub fn prepare_directories_at(
         application_support: &Path,
     ) -> Result<BotApiDirectories, TelegramError> {
-        let data = application_support.join("telegram-bot-api");
+        // The packaged executable is named `telegram-bot-api` in the same
+        // application-support directory. Keep runtime data at a distinct path
+        // so a regular executable file never collides with this directory.
+        let data = application_support.join(BOT_API_DATA_DIRECTORY_NAME);
         let temporary = data.join("temp");
         fs::create_dir_all(&temporary).map_err(|_| TelegramError::RequestFailed)?;
         for directory in [application_support, data.as_path(), temporary.as_path()] {
@@ -663,7 +667,8 @@ fn migration_marker_directory() -> Result<PathBuf, TelegramError> {
     Ok(base_directories
         .data_local_dir()
         .join(APP_SUPPORT_DIRECTORY_NAME)
-        .join("telegram-bot-api/cloud-migrations"))
+        .join(BOT_API_DATA_DIRECTORY_NAME)
+        .join("cloud-migrations"))
 }
 
 fn token_fingerprint(bot_token: &secrecy::SecretString) -> String {

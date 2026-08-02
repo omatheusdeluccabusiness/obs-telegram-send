@@ -97,11 +97,11 @@ fn local_bot_api_directories_are_private_and_user_writable() {
 
     assert_eq!(
         directories.data_dir(),
-        application_support.join("telegram-bot-api")
+        application_support.join("telegram-bot-api-data")
     );
     assert_eq!(
         directories.temp_dir(),
-        application_support.join("telegram-bot-api/temp")
+        application_support.join("telegram-bot-api-data/temp")
     );
     for directory in [
         application_support.as_path(),
@@ -114,6 +114,23 @@ fn local_bot_api_directories_are_private_and_user_writable() {
             0o700
         );
     }
+}
+
+#[test]
+fn local_bot_api_data_directory_does_not_collide_with_packaged_executable() {
+    let temporary_root = tempfile::tempdir().unwrap();
+    let application_support = temporary_root.path().join("OBS-Telegram-Send");
+    std::fs::create_dir_all(&application_support).unwrap();
+    std::fs::write(application_support.join("telegram-bot-api"), b"executable").unwrap();
+
+    let directories = LocalBotApiServer::prepare_directories_at(&application_support).unwrap();
+
+    assert_eq!(
+        directories.data_dir(),
+        application_support.join("telegram-bot-api-data")
+    );
+    assert!(directories.temp_dir().is_dir());
+    assert!(application_support.join("telegram-bot-api").is_file());
 }
 
 #[test]
