@@ -414,17 +414,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.resolve.outputs.tag }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.sha }}
+          RELEASE_REPOSITORY: origin
         run: |
           set -euo pipefail
           package='dist/OBS-Telegram-Send-macOS.pkg'
-          test -f "$package"
           notes='Signed and notarized macOS release candidate. Keep this GitHub Release as a draft until it has been manually installed and verified in a clean macOS account.'
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" == 'true' ]] || {
-              printf '%s\n' 'Refusing to upload a release package to a non-draft GitHub Release.' >&2
-              exit 1
-            }
-            gh release upload "$TAG" "$package" --clobber
-          else
-            gh release create "$TAG" "$package" --draft --title "$TAG" --notes "$notes"
-          fi
+          scripts/publish-draft-release.sh "$package" "$notes"
