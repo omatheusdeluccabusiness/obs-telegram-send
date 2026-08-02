@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing v* tag to package
+        description: Existing semantic vMAJOR.MINOR.PATCH tag to package
         required: true
         type: string
       package_mode:
-        description: Development is CI-only; release creates a signed draft after manual review.
+        description: Development is CI-only; release creates a signed draft after approval.
         required: true
         default: development
         type: choice
@@ -24,80 +24,353 @@ permissions:
 
 env:
   OBS_VERSION: 32.1.1
+  OBS_DMG_SHA256: e62c2fbea6872b015d0e9cf11f8be1ce4c545a5ce39da32420f754f2b0461dcb
+  OBS_SOURCE_REVISION: 7272af1375b38bc3cf4e0f98a5d999e8b76e9309
+  OBS_DEPS_VERSION: 2025-08-23
+  OBS_DEPS_ARCHIVE_SHA256: 9403bb43fb0a9bb215739a5659ca274fe884dbbbcd22bd9ca781c961fb041c42
+  OBS_QT_ARCHIVE_SHA256: 990f11638b80a4509e14e8c315f6e4caa0861e37fcd3113a256fbff835ffca29
+  CMAKE_VERSION: 3.31.8
+  CMAKE_ARCHIVE_SHA256: d1449f969c54d5c00886d5b643340d493dfb3c81cb39ee29b35453395c11ebf7
+  NINJA_VERSION: 1.12.1
+  NINJA_ARCHIVE_SHA256: 89a287444b5b3e98f88a945afa50ce937b8ffd1dcc59c555ad9b1baf855298c9
+  GPERF_VERSION: '3.1'
+  GPERF_ARCHIVE_SHA256: 588546b945bba4b70b6a3a616e80b4ab466e3f33024a352fc2198112cdbb3ae2
+  OPENSSL_VERSION: 3.4.1
+  OPENSSL_ARCHIVE_SHA256: 002a2d6b30b58bf4bea46c43bdd96365aaf8daa6c428782aa4feee06da197df3
+  GOOGLETEST_VERSION: 1.17.0
+  GOOGLETEST_ARCHIVE_SHA256: 65fab701d9829d38cb77c14acdc431d2108bfdbf8979e40eb8ae567edf10b27c
+  RUST_TOOLCHAIN: 1.88.0
   TELEGRAM_BOT_API_REVISION: adfd7f6a8e990272851777eeb3ae0def4216f161
 
 jobs:
-  package:
-    name: Package (${{ github.event_name == 'workflow_dispatch' && inputs.package_mode || 'development' }})
-    runs-on: macos-14
+  resolve:
+    name: Resolve exact release tag
+    runs-on: ubuntu-24.04
     outputs:
-      mode: ${{ steps.mode.outputs.value }}
-      tag: ${{ steps.mode.outputs.tag }}
+      mode: ${{ steps.resolve.outputs.mode }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      # This checkout loads only the trusted resolver from the workflow ref.
+      # Artifact source is checked out by the immutable SHA resolved below.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+
+      - id: resolve
+        name: Validate tag and resolve immutable commit
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_INPUT_MODE: ${{ inputs.package_mode }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: origin
+        run: scripts/resolve-release-inputs.sh
+
+  development:
+    name: Build development-only package
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'development'
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
 
-      - id: mode
-        name: Select package mode
-        shell: bash
+      - name: Install pinned build toolchain
         run: |
           set -euo pipefail
-          mode='development'
-          tag="${GITHUB_REF_NAME}"
-          if [[ "${{ github.event_name }}" == 'workflow_dispatch' ]]; then
-            mode='${{ inputs.package_mode }}'
-            tag='${{ inputs.tag }}'
-          fi
-          [[ "$tag" =~ ^v.+ ]] || { printf '%s\n' 'Only v* tags may be packaged.' >&2; exit 64; }
-          printf 'value=%s\n' "$mode" >> "$GITHUB_OUTPUT"
-          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          xcode_path='/Applications/Xcode_16.2.app'
+          test -d "$xcode_path"
+          sudo xcode-select --switch "$xcode_path"
+          xcodebuild -version | grep -Fx 'Xcode 16.2'
+          xcodebuild -version | grep -Fx 'Build version 16C5032a'
 
-      - name: Install build tools
-        run: brew install cmake ninja gperf openssl@3
+          toolchain="$RUNNER_TEMP/release-toolchain"
+          mkdir -p "$toolchain/bin"
+          scripts/download-verified.sh \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-macos-universal.tar.gz" \
+            "$CMAKE_ARCHIVE_SHA256" "$RUNNER_TEMP/cmake.tar.gz"
+          tar -xzf "$RUNNER_TEMP/cmake.tar.gz" -C "$toolchain"
+          cmake_app="$toolchain/cmake-${CMAKE_VERSION}-macos-universal/CMake.app"
+          codesign --verify --deep --strict --verbose=2 "$cmake_app"
+          spctl --assess --type execute --verbose=4 "$cmake_app"
+          printf '%s\n' "$cmake_app/Contents/bin" >> "$GITHUB_PATH"
 
-      - name: Download OBS Studio 32.1.1 for Apple Silicon
+          scripts/download-verified.sh \
+            "https://github.com/ninja-build/ninja/releases/download/v${NINJA_VERSION}/ninja-mac.zip" \
+            "$NINJA_ARCHIVE_SHA256" "$RUNNER_TEMP/ninja.zip"
+          ditto -x -k "$RUNNER_TEMP/ninja.zip" "$toolchain/bin"
+          chmod 0755 "$toolchain/bin/ninja"
+          printf '%s\n' "$toolchain/bin" >> "$GITHUB_PATH"
+
+          scripts/download-verified.sh \
+            "https://ftp.gnu.org/gnu/gperf/gperf-${GPERF_VERSION}.tar.gz" \
+            "$GPERF_ARCHIVE_SHA256" "$RUNNER_TEMP/gperf.tar.gz"
+          tar -xzf "$RUNNER_TEMP/gperf.tar.gz" -C "$RUNNER_TEMP"
+          (cd "$RUNNER_TEMP/gperf-${GPERF_VERSION}" && \
+            ./configure --prefix="$toolchain" && \
+            make -j "$(sysctl -n hw.ncpu)" && make install)
+
+          scripts/download-verified.sh \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
+            "$OPENSSL_ARCHIVE_SHA256" "$RUNNER_TEMP/openssl.tar.gz"
+          tar -xzf "$RUNNER_TEMP/openssl.tar.gz" -C "$RUNNER_TEMP"
+          (cd "$RUNNER_TEMP/openssl-${OPENSSL_VERSION}" && \
+            ./Configure darwin64-arm64-cc --prefix="$toolchain/openssl" no-shared && \
+            make -j "$(sysctl -n hw.ncpu)" && make install_sw)
+          printf '%s\n' "$toolchain/openssl/bin" >> "$GITHUB_PATH"
+          printf 'OPENSSL_ROOT_DIR=%s\n' "$toolchain/openssl" >> "$GITHUB_ENV"
+          printf 'CMAKE_PREFIX_PATH=%s\n' "$toolchain/openssl" >> "$GITHUB_ENV"
+
+          scripts/download-verified.sh \
+            "https://github.com/obsproject/obs-deps/releases/download/${OBS_DEPS_VERSION}/macos-deps-${OBS_DEPS_VERSION}-universal.tar.xz" \
+            "$OBS_DEPS_ARCHIVE_SHA256" "$RUNNER_TEMP/obs-deps.tar.xz"
+          tar -xJf "$RUNNER_TEMP/obs-deps.tar.xz" -C "$RUNNER_TEMP"
+          scripts/download-verified.sh \
+            "https://github.com/obsproject/obs-deps/releases/download/${OBS_DEPS_VERSION}/macos-deps-qt6-${OBS_DEPS_VERSION}-universal.tar.xz" \
+            "$OBS_QT_ARCHIVE_SHA256" "$RUNNER_TEMP/obs-qt6.tar.xz"
+          tar -xJf "$RUNNER_TEMP/obs-qt6.tar.xz" -C "$RUNNER_TEMP"
+          scripts/download-verified.sh \
+            "https://github.com/google/googletest/archive/refs/tags/v${GOOGLETEST_VERSION}.tar.gz" \
+            "$GOOGLETEST_ARCHIVE_SHA256" "$RUNNER_TEMP/googletest.tar.gz"
+          tar -xzf "$RUNNER_TEMP/googletest.tar.gz" -C "$RUNNER_TEMP"
+
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup target add --toolchain "$RUST_TOOLCHAIN" aarch64-apple-darwin
+          printf 'RUSTUP_TOOLCHAIN=%s\n' "$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+
+      - name: Verify pinned toolchain
         run: |
           set -euo pipefail
-          curl --fail --location --retry 3 \
+          test "$(cmake --version | head -n 1)" = "cmake version ${CMAKE_VERSION}"
+          test "$(ninja --version)" = "$NINJA_VERSION"
+          gperf --version | head -n 1 | grep -F "GNU gperf ${GPERF_VERSION}"
+          test "$(openssl version)" = "OpenSSL ${OPENSSL_VERSION} 11 Feb 2025"
+          rustc --version | grep -F "rustc ${RUST_TOOLCHAIN}"
+
+      - name: Download and verify OBS Studio 32.1.1 arm64
+        run: |
+          set -euo pipefail
+          scripts/download-verified.sh \
             "https://github.com/obsproject/obs-studio/releases/download/${OBS_VERSION}/OBS-Studio-${OBS_VERSION}-macOS-Apple.dmg" \
-            --output "$RUNNER_TEMP/obs.dmg"
+            "$OBS_DMG_SHA256" "$RUNNER_TEMP/obs.dmg"
           hdiutil attach "$RUNNER_TEMP/obs.dmg" -readonly -nobrowse -mountpoint "$RUNNER_TEMP/obs-mount"
           cp -R "$RUNNER_TEMP/obs-mount/OBS.app" "$RUNNER_TEMP/OBS.app"
           hdiutil detach "$RUNNER_TEMP/obs-mount"
+          codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/OBS.app"
+          spctl --assess --type execute --verbose=4 "$RUNNER_TEMP/OBS.app"
 
-      - name: Fetch OBS 32.1.1 headers
+      - name: Fetch pinned official sources
         run: |
           set -euo pipefail
-          git clone --filter=blob:none --no-checkout https://github.com/obsproject/obs-studio.git "$RUNNER_TEMP/obs-source"
-          git -C "$RUNNER_TEMP/obs-source" checkout --detach 7272af1375b38bc3cf4e0f98a5d999e8b76e9309
+          git init -q "$RUNNER_TEMP/obs-source"
+          git -C "$RUNNER_TEMP/obs-source" remote add origin https://github.com/obsproject/obs-studio.git
+          git -C "$RUNNER_TEMP/obs-source" fetch --depth 1 origin "$OBS_SOURCE_REVISION"
+          test "$(git -C "$RUNNER_TEMP/obs-source" rev-parse FETCH_HEAD)" = "$OBS_SOURCE_REVISION"
+          git -C "$RUNNER_TEMP/obs-source" checkout --detach FETCH_HEAD
 
-      - name: Build OBS plugin and local agent
+          git init -q "$RUNNER_TEMP/telegram-bot-api"
+          git -C "$RUNNER_TEMP/telegram-bot-api" remote add origin https://github.com/tdlib/telegram-bot-api.git
+          git -C "$RUNNER_TEMP/telegram-bot-api" fetch --depth 1 origin "$TELEGRAM_BOT_API_REVISION"
+          test "$(git -C "$RUNNER_TEMP/telegram-bot-api" rev-parse FETCH_HEAD)" = "$TELEGRAM_BOT_API_REVISION"
+          git -C "$RUNNER_TEMP/telegram-bot-api" checkout --detach FETCH_HEAD
+          git -C "$RUNNER_TEMP/telegram-bot-api" submodule update --init --recursive --depth 1
+
+      - name: Build and test arm64 components
         run: |
           set -euo pipefail
           cargo test --manifest-path agent/Cargo.toml
-          cargo build --manifest-path agent/Cargo.toml --release
+          cargo build --manifest-path agent/Cargo.toml --release --target aarch64-apple-darwin
+          cmake -S . -B build-tests -G Ninja \
+            -DOBS_APP_BUNDLE="$RUNNER_TEMP/OBS.app" \
+            -DOBS_INCLUDE_DIR="$RUNNER_TEMP/obs-source/libobs" \
+            -DOBS_DEPENDENCIES_INCLUDE_DIR="$RUNNER_TEMP/obs-deps-${OBS_DEPS_VERSION}-universal/include" \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/obs-qt6-${OBS_DEPS_VERSION}-universal" \
+            -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST="$RUNNER_TEMP/googletest-${GOOGLETEST_VERSION}"
+          cmake --build build-tests --config Release
+          ctest --test-dir build-tests --output-on-failure
           cmake -S . -B build -G Ninja \
             -DOBS_APP_BUNDLE="$RUNNER_TEMP/OBS.app" \
             -DOBS_INCLUDE_DIR="$RUNNER_TEMP/obs-source/libobs" \
+            -DOBS_DEPENDENCIES_INCLUDE_DIR="$RUNNER_TEMP/obs-deps-${OBS_DEPS_VERSION}-universal/include" \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/obs-qt6-${OBS_DEPS_VERSION}-universal" \
+            -DBUILD_TESTING=OFF \
             -DCMAKE_OSX_ARCHITECTURES=arm64
           cmake --build build --config Release
-          ctest --test-dir build --output-on-failure
-
-      - name: Build pinned official Telegram Bot API server
-        run: |
-          set -euo pipefail
-          git clone --recurse-submodules https://github.com/tdlib/telegram-bot-api.git "$RUNNER_TEMP/telegram-bot-api"
-          git -C "$RUNNER_TEMP/telegram-bot-api" checkout --detach "$TELEGRAM_BOT_API_REVISION"
-          git -C "$RUNNER_TEMP/telegram-bot-api" submodule update --init --recursive
           cmake -S "$RUNNER_TEMP/telegram-bot-api" -B "$RUNNER_TEMP/telegram-bot-api/build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix openssl@3)"
+            -DOPENSSL_ROOT_DIR="$OPENSSL_ROOT_DIR"
+          cmake --build "$RUNNER_TEMP/telegram-bot-api/build" --target telegram-bot-api
+
+      - name: Build and verify development package
+        env:
+          PACKAGE_MODE: ${{ needs.resolve.outputs.mode }}
+          PACKAGE_VERSION: ${{ needs.resolve.outputs.version }}
+          OBS_TELEGRAM_CTEST_DIR: ${{ github.workspace }}/build-tests
+        run: |
+          set -euo pipefail
+          scripts/build-release-package.sh "$PACKAGE_MODE" "$PACKAGE_VERSION" \
+            "$GITHUB_WORKSPACE/build/plugin/obs-telegram-send.plugin" \
+            "$GITHUB_WORKSPACE/agent/target/aarch64-apple-darwin/release/obs-telegram-agent" \
+            "$RUNNER_TEMP/telegram-bot-api/build/telegram-bot-api"
+          scripts/verify-release.sh --development
+
+      - name: Upload development-only package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: OBS-Telegram-Send-macOS-development-${{ needs.resolve.outputs.tag }}
+          path: dist/OBS-Telegram-Send-macOS-development.pkg
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Build signed draft release
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'release'
+    runs-on: macos-14
+    permissions:
+      contents: write
+    # Configure the GitHub Environment named "release" with required reviewers.
+    # Its approval is the mandatory human gate before signing secrets are exposed.
+    environment:
+      name: release
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Install pinned build toolchain
+        run: |
+          set -euo pipefail
+          xcode_path='/Applications/Xcode_16.2.app'
+          test -d "$xcode_path"
+          sudo xcode-select --switch "$xcode_path"
+          xcodebuild -version | grep -Fx 'Xcode 16.2'
+          xcodebuild -version | grep -Fx 'Build version 16C5032a'
+
+          toolchain="$RUNNER_TEMP/release-toolchain"
+          mkdir -p "$toolchain/bin"
+          scripts/download-verified.sh \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-macos-universal.tar.gz" \
+            "$CMAKE_ARCHIVE_SHA256" "$RUNNER_TEMP/cmake.tar.gz"
+          tar -xzf "$RUNNER_TEMP/cmake.tar.gz" -C "$toolchain"
+          cmake_app="$toolchain/cmake-${CMAKE_VERSION}-macos-universal/CMake.app"
+          codesign --verify --deep --strict --verbose=2 "$cmake_app"
+          spctl --assess --type execute --verbose=4 "$cmake_app"
+          printf '%s\n' "$cmake_app/Contents/bin" >> "$GITHUB_PATH"
+
+          scripts/download-verified.sh \
+            "https://github.com/ninja-build/ninja/releases/download/v${NINJA_VERSION}/ninja-mac.zip" \
+            "$NINJA_ARCHIVE_SHA256" "$RUNNER_TEMP/ninja.zip"
+          ditto -x -k "$RUNNER_TEMP/ninja.zip" "$toolchain/bin"
+          chmod 0755 "$toolchain/bin/ninja"
+          printf '%s\n' "$toolchain/bin" >> "$GITHUB_PATH"
+
+          scripts/download-verified.sh \
+            "https://ftp.gnu.org/gnu/gperf/gperf-${GPERF_VERSION}.tar.gz" \
+            "$GPERF_ARCHIVE_SHA256" "$RUNNER_TEMP/gperf.tar.gz"
+          tar -xzf "$RUNNER_TEMP/gperf.tar.gz" -C "$RUNNER_TEMP"
+          (cd "$RUNNER_TEMP/gperf-${GPERF_VERSION}" && \
+            ./configure --prefix="$toolchain" && \
+            make -j "$(sysctl -n hw.ncpu)" && make install)
+
+          scripts/download-verified.sh \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
+            "$OPENSSL_ARCHIVE_SHA256" "$RUNNER_TEMP/openssl.tar.gz"
+          tar -xzf "$RUNNER_TEMP/openssl.tar.gz" -C "$RUNNER_TEMP"
+          (cd "$RUNNER_TEMP/openssl-${OPENSSL_VERSION}" && \
+            ./Configure darwin64-arm64-cc --prefix="$toolchain/openssl" no-shared && \
+            make -j "$(sysctl -n hw.ncpu)" && make install_sw)
+          printf '%s\n' "$toolchain/openssl/bin" >> "$GITHUB_PATH"
+          printf 'OPENSSL_ROOT_DIR=%s\n' "$toolchain/openssl" >> "$GITHUB_ENV"
+          printf 'CMAKE_PREFIX_PATH=%s\n' "$toolchain/openssl" >> "$GITHUB_ENV"
+
+          scripts/download-verified.sh \
+            "https://github.com/obsproject/obs-deps/releases/download/${OBS_DEPS_VERSION}/macos-deps-${OBS_DEPS_VERSION}-universal.tar.xz" \
+            "$OBS_DEPS_ARCHIVE_SHA256" "$RUNNER_TEMP/obs-deps.tar.xz"
+          tar -xJf "$RUNNER_TEMP/obs-deps.tar.xz" -C "$RUNNER_TEMP"
+          scripts/download-verified.sh \
+            "https://github.com/obsproject/obs-deps/releases/download/${OBS_DEPS_VERSION}/macos-deps-qt6-${OBS_DEPS_VERSION}-universal.tar.xz" \
+            "$OBS_QT_ARCHIVE_SHA256" "$RUNNER_TEMP/obs-qt6.tar.xz"
+          tar -xJf "$RUNNER_TEMP/obs-qt6.tar.xz" -C "$RUNNER_TEMP"
+          scripts/download-verified.sh \
+            "https://github.com/google/googletest/archive/refs/tags/v${GOOGLETEST_VERSION}.tar.gz" \
+            "$GOOGLETEST_ARCHIVE_SHA256" "$RUNNER_TEMP/googletest.tar.gz"
+          tar -xzf "$RUNNER_TEMP/googletest.tar.gz" -C "$RUNNER_TEMP"
+
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup target add --toolchain "$RUST_TOOLCHAIN" aarch64-apple-darwin
+          printf 'RUSTUP_TOOLCHAIN=%s\n' "$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+
+      - name: Verify pinned toolchain
+        run: |
+          set -euo pipefail
+          test "$(cmake --version | head -n 1)" = "cmake version ${CMAKE_VERSION}"
+          test "$(ninja --version)" = "$NINJA_VERSION"
+          gperf --version | head -n 1 | grep -F "GNU gperf ${GPERF_VERSION}"
+          test "$(openssl version)" = "OpenSSL ${OPENSSL_VERSION} 11 Feb 2025"
+          rustc --version | grep -F "rustc ${RUST_TOOLCHAIN}"
+
+      - name: Download and verify OBS Studio 32.1.1 arm64
+        run: |
+          set -euo pipefail
+          scripts/download-verified.sh \
+            "https://github.com/obsproject/obs-studio/releases/download/${OBS_VERSION}/OBS-Studio-${OBS_VERSION}-macOS-Apple.dmg" \
+            "$OBS_DMG_SHA256" "$RUNNER_TEMP/obs.dmg"
+          hdiutil attach "$RUNNER_TEMP/obs.dmg" -readonly -nobrowse -mountpoint "$RUNNER_TEMP/obs-mount"
+          cp -R "$RUNNER_TEMP/obs-mount/OBS.app" "$RUNNER_TEMP/OBS.app"
+          hdiutil detach "$RUNNER_TEMP/obs-mount"
+          codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/OBS.app"
+          spctl --assess --type execute --verbose=4 "$RUNNER_TEMP/OBS.app"
+
+      - name: Fetch pinned official sources
+        run: |
+          set -euo pipefail
+          git init -q "$RUNNER_TEMP/obs-source"
+          git -C "$RUNNER_TEMP/obs-source" remote add origin https://github.com/obsproject/obs-studio.git
+          git -C "$RUNNER_TEMP/obs-source" fetch --depth 1 origin "$OBS_SOURCE_REVISION"
+          test "$(git -C "$RUNNER_TEMP/obs-source" rev-parse FETCH_HEAD)" = "$OBS_SOURCE_REVISION"
+          git -C "$RUNNER_TEMP/obs-source" checkout --detach FETCH_HEAD
+
+          git init -q "$RUNNER_TEMP/telegram-bot-api"
+          git -C "$RUNNER_TEMP/telegram-bot-api" remote add origin https://github.com/tdlib/telegram-bot-api.git
+          git -C "$RUNNER_TEMP/telegram-bot-api" fetch --depth 1 origin "$TELEGRAM_BOT_API_REVISION"
+          test "$(git -C "$RUNNER_TEMP/telegram-bot-api" rev-parse FETCH_HEAD)" = "$TELEGRAM_BOT_API_REVISION"
+          git -C "$RUNNER_TEMP/telegram-bot-api" checkout --detach FETCH_HEAD
+          git -C "$RUNNER_TEMP/telegram-bot-api" submodule update --init --recursive --depth 1
+
+      - name: Build and test arm64 components
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path agent/Cargo.toml
+          cargo build --manifest-path agent/Cargo.toml --release --target aarch64-apple-darwin
+          cmake -S . -B build-tests -G Ninja \
+            -DOBS_APP_BUNDLE="$RUNNER_TEMP/OBS.app" \
+            -DOBS_INCLUDE_DIR="$RUNNER_TEMP/obs-source/libobs" \
+            -DOBS_DEPENDENCIES_INCLUDE_DIR="$RUNNER_TEMP/obs-deps-${OBS_DEPS_VERSION}-universal/include" \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/obs-qt6-${OBS_DEPS_VERSION}-universal" \
+            -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST="$RUNNER_TEMP/googletest-${GOOGLETEST_VERSION}"
+          cmake --build build-tests --config Release
+          ctest --test-dir build-tests --output-on-failure
+          cmake -S . -B build -G Ninja \
+            -DOBS_APP_BUNDLE="$RUNNER_TEMP/OBS.app" \
+            -DOBS_INCLUDE_DIR="$RUNNER_TEMP/obs-source/libobs" \
+            -DOBS_DEPENDENCIES_INCLUDE_DIR="$RUNNER_TEMP/obs-deps-${OBS_DEPS_VERSION}-universal/include" \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/obs-qt6-${OBS_DEPS_VERSION}-universal" \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_OSX_ARCHITECTURES=arm64
+          cmake --build build --config Release
+          cmake -S "$RUNNER_TEMP/telegram-bot-api" -B "$RUNNER_TEMP/telegram-bot-api/build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DOPENSSL_ROOT_DIR="$OPENSSL_ROOT_DIR"
           cmake --build "$RUNNER_TEMP/telegram-bot-api/build" --target telegram-bot-api
 
       - name: Install protected signing keychain
-        if: steps.mode.outputs.value == 'release'
         env:
           OBS_TELEGRAM_SIGNING_KEYCHAIN_BASE64: ${{ secrets.OBS_TELEGRAM_SIGNING_KEYCHAIN_BASE64 }}
           OBS_TELEGRAM_SIGNING_KEYCHAIN_PASSWORD: ${{ secrets.OBS_TELEGRAM_SIGNING_KEYCHAIN_PASSWORD }}
@@ -113,55 +386,34 @@ jobs:
           security set-keychain-settings -lut 21600 "$keychain"
           security list-keychains -d user -s "$keychain" login.keychain-db
 
-      - name: Build package
+      - name: Build and verify signed release package
         env:
+          PACKAGE_MODE: ${{ needs.resolve.outputs.mode }}
+          PACKAGE_VERSION: ${{ needs.resolve.outputs.version }}
+          OBS_TELEGRAM_CTEST_DIR: ${{ github.workspace }}/build-tests
           OBS_TELEGRAM_DEVELOPER_ID_APPLICATION: ${{ secrets.OBS_TELEGRAM_DEVELOPER_ID_APPLICATION }}
           OBS_TELEGRAM_DEVELOPER_ID_INSTALLER: ${{ secrets.OBS_TELEGRAM_DEVELOPER_ID_INSTALLER }}
           OBS_TELEGRAM_NOTARY_PROFILE: ${{ secrets.OBS_TELEGRAM_NOTARY_PROFILE }}
         run: |
           set -euo pipefail
-          mode='${{ steps.mode.outputs.value }}'
-          bash installer/macos/build-package.sh "--${mode}" \
-            --plugin "$GITHUB_WORKSPACE/build/plugin/obs-telegram-send.plugin" \
-            --agent "$GITHUB_WORKSPACE/agent/target/release/obs-telegram-agent" \
-            --telegram-bot-api "$RUNNER_TEMP/telegram-bot-api/build/telegram-bot-api"
-          bash scripts/verify-release.sh "--${mode}"
-
-      - name: Upload development-only package
-        if: steps.mode.outputs.value == 'development'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: OBS-Telegram-Send-macOS-development-${{ steps.mode.outputs.tag }}
-          path: dist/OBS-Telegram-Send-macOS-development.pkg
-          if-no-files-found: error
-          retention-days: 14
+          scripts/build-release-package.sh "$PACKAGE_MODE" "$PACKAGE_VERSION" \
+            "$GITHUB_WORKSPACE/build/plugin/obs-telegram-send.plugin" \
+            "$GITHUB_WORKSPACE/agent/target/aarch64-apple-darwin/release/obs-telegram-agent" \
+            "$RUNNER_TEMP/telegram-bot-api/build/telegram-bot-api"
+          scripts/verify-release.sh --release
 
       - name: Upload release candidate package
-        if: steps.mode.outputs.value == 'release'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: OBS-Telegram-Send-macOS-release-candidate-${{ steps.mode.outputs.tag }}
+          name: OBS-Telegram-Send-macOS-release-candidate-${{ needs.resolve.outputs.tag }}
           path: dist/OBS-Telegram-Send-macOS.pkg
           if-no-files-found: error
           retention-days: 30
 
-  publish-draft:
-    name: Create signed draft release
-    needs: package
-    if: needs.package.outputs.mode == 'release'
-    runs-on: macos-14
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: OBS-Telegram-Send-macOS-release-candidate-${{ needs.package.outputs.tag }}
-          path: dist
-
       - name: Create or update draft only
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.package.outputs.tag }}
+          TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
           package='dist/OBS-Telegram-Send-macOS.pkg'

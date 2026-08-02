@@ -3,6 +3,7 @@ set -euo pipefail
 
 root_dir="${OBS_TELEGRAM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 dist_dir="${OBS_TELEGRAM_DIST_DIR:-$root_dir/dist}"
+ctest_dir="${OBS_TELEGRAM_CTEST_DIR:-$root_dir/build}"
 mode='development'
 
 usage() {
@@ -28,12 +29,12 @@ fi
 
 cargo test --manifest-path "$root_dir/agent/Cargo.toml"
 if command -v ctest >/dev/null 2>&1; then
-  ctest --test-dir "$root_dir/build" --output-on-failure
-elif [[ "$mode" == 'development' && -f "$root_dir/build/Makefile" ]]; then
+  ctest --test-dir "$ctest_dir" --output-on-failure
+elif [[ "$mode" == 'development' && -f "$ctest_dir/Makefile" ]]; then
   # The local developer image may retain a configured Makefile after CMake has
   # been removed. Keep the development verification usable without weakening
   # the release runner, which must have the explicit CTest command available.
-  make -C "$root_dir/build" test
+  make -C "$ctest_dir" test
 else
   printf '%s\n' 'ctest é obrigatório para verificar um pacote de release.' >&2
   exit 69
