@@ -1,6 +1,7 @@
 use std::net::Ipv4Addr;
 
 use obs_telegram_agent::install_bearer::InstallBearerStore;
+use obs_telegram_agent::telegram::LocalBotApiServer;
 use secrecy::ExposeSecret;
 use tokio::net::TcpListener;
 
@@ -22,10 +23,11 @@ async fn main() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, listener_port()))
         .await
         .expect("agent must bind to the local loopback interface");
-
+    let local_bot_api = LocalBotApiServer::start_if_configured(8081)
+        .expect("agent must load its protected Telegram configuration");
     axum::serve(
         listener,
-        obs_telegram_agent::app_with_secret(install_bearer.expose_secret()),
+        obs_telegram_agent::app_with_local_bot_api(install_bearer.expose_secret(), local_bot_api),
     )
     .await
     .expect("agent server stopped unexpectedly");
