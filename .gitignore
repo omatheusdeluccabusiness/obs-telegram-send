@@ -4,3 +4,4 @@ build/
 dist/
 agent/target/
 .DS_Store
+*.xcuserstate
