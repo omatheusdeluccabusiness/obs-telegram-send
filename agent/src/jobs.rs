@@ -11,7 +11,10 @@ use directories_next::BaseDirs;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use crate::{install_bearer::APP_SUPPORT_DIRECTORY_NAME, telegram::TelegramClient};
+use crate::{
+    install_bearer::APP_SUPPORT_DIRECTORY_NAME,
+    telegram::{TelegramClient, UploadError},
+};
 
 pub const MAX_FILE_SIZE_BYTES: u64 = 2 * 1024_u64.pow(3);
 const JOBS_FILE_NAME: &str = "upload-jobs.json";
@@ -267,9 +270,17 @@ impl<G: TelegramClient> JobService<G> {
                 job.status.retryable_error = None;
                 job.recording_path = None;
             }
-            Err(_) => {
+            Err(UploadError::PreUploadRejected) => {
                 job.status.state = JobState::Failed;
                 job.status.retryable_error = Some("Telegram upload failed. Try again.".to_owned());
+            }
+            Err(UploadError::TransportUncertain) => {
+                job.status.state = JobState::Unknown;
+                job.status.retryable_error = Some(
+                    "Telegram may have received this recording. Verify before sending again."
+                        .to_owned(),
+                );
+                job.recording_path = None;
             }
         }
         if self.store.save(&jobs).is_err() {
@@ -292,14 +303,22 @@ impl<G: TelegramClient> JobService<G> {
     // Marks a failed job pollable as queued. The route starts it in a separate task.
     pub async fn retry(&self, job_id: &str) -> Result<JobStatus, JobError> {
         let mut jobs = self.jobs.lock().unwrap();
-        let job = jobs.get_mut(job_id).ok_or(JobError::NotFound)?;
-        if job.status.state != JobState::Failed {
-            return Err(JobError::NotRetryable);
+        let (previous_status, status) = {
+            let job = jobs.get_mut(job_id).ok_or(JobError::NotFound)?;
+            if job.status.state != JobState::Failed {
+                return Err(JobError::NotRetryable);
+            }
+            let previous_status = job.status.clone();
+            job.status.state = JobState::Queued;
+            job.status.retryable_error = None;
+            (previous_status, job.status.clone())
+        };
+        if self.store.save(&jobs).is_err() {
+            jobs.get_mut(job_id)
+                .expect("job is retained while retrying")
+                .status = previous_status;
+            return Err(JobError::StorageUnavailable);
         }
-        job.status.state = JobState::Queued;
-        job.status.retryable_error = None;
-        let status = job.status.clone();
-        self.store.save(&jobs)?;
         Ok(status)
     }
 }

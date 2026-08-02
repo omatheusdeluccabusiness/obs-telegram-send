@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use obs_telegram_agent::{
     jobs::{JobError, JobService},
-    telegram::TelegramClient,
+    telegram::{TelegramClient, UploadError},
 };
 
 #[derive(Clone, Default)]
@@ -24,6 +24,9 @@ struct PersistBlockingGateway {
     directory: PathBuf,
 }
 
+#[derive(Clone, Default)]
+struct UncertainGateway;
+
 impl FakeGateway {
     fn uploads(&self) -> Vec<(PathBuf, String)> {
         self.uploads.lock().unwrap().clone()
@@ -32,7 +35,7 @@ impl FakeGateway {
 
 #[async_trait]
 impl TelegramClient for FakeGateway {
-    async fn upload_file(&self, path: PathBuf, display_name: String) -> Result<(), String> {
+    async fn upload_file(&self, path: PathBuf, display_name: String) -> Result<(), UploadError> {
         self.uploads.lock().unwrap().push((path, display_name));
         Ok(())
     }
@@ -40,20 +43,27 @@ impl TelegramClient for FakeGateway {
 
 #[async_trait]
 impl TelegramClient for FailingGateway {
-    async fn upload_file(&self, _path: PathBuf, _display_name: String) -> Result<(), String> {
+    async fn upload_file(&self, _path: PathBuf, _display_name: String) -> Result<(), UploadError> {
         *self.uploads.lock().unwrap() += 1;
-        Err("network unavailable".to_owned())
+        Err(UploadError::PreUploadRejected)
     }
 }
 
 #[async_trait]
 impl TelegramClient for PersistBlockingGateway {
-    async fn upload_file(&self, _path: PathBuf, _display_name: String) -> Result<(), String> {
+    async fn upload_file(&self, _path: PathBuf, _display_name: String) -> Result<(), UploadError> {
         std::fs::set_permissions(
             &self.directory,
             std::os::unix::fs::PermissionsExt::from_mode(0o500),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|_| UploadError::PreUploadRejected)
+    }
+}
+
+#[async_trait]
+impl TelegramClient for UncertainGateway {
+    async fn upload_file(&self, _path: PathBuf, _display_name: String) -> Result<(), UploadError> {
+        Err(UploadError::TransportUncertain)
     }
 }
 
@@ -205,6 +215,47 @@ async fn a_completion_persist_failure_marks_the_job_unknown_and_never_retryable(
         obs_telegram_agent::jobs::JobState::Unknown
     );
     assert_eq!(service.retry(&id).await, Err(JobError::NotRetryable));
+}
+
+#[tokio::test]
+async fn an_uncertain_transport_result_is_unknown_and_never_offered_for_retry() {
+    let service = JobService::new(UncertainGateway);
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let id = service
+        .enqueue(source.path().to_path_buf(), "recording.mp4".to_owned())
+        .await
+        .unwrap();
+
+    service.start_upload(&id).await.unwrap();
+
+    assert_eq!(
+        service.status(&id).await.unwrap().state,
+        obs_telegram_agent::jobs::JobState::Unknown
+    );
+    assert_eq!(service.retry(&id).await, Err(JobError::NotRetryable));
+}
+
+#[tokio::test]
+async fn retry_save_failure_rolls_back_to_the_failed_pollable_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = JobService::at(FailingGateway::default(), directory.path()).unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let id = service
+        .enqueue(source.path().to_path_buf(), "recording.mp4".to_owned())
+        .await
+        .unwrap();
+    service.start_upload(&id).await.unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o500),
+    )
+    .unwrap();
+
+    assert_eq!(service.retry(&id).await, Err(JobError::StorageUnavailable));
+    assert_eq!(
+        service.status(&id).await.unwrap().state,
+        obs_telegram_agent::jobs::JobState::Failed
+    );
 }
 
 #[tokio::test]

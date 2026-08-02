@@ -31,6 +31,12 @@ pub enum TelegramError {
     RequestFailed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UploadError {
+    PreUploadRejected,
+    TransportUncertain,
+}
+
 impl std::fmt::Display for TelegramError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
@@ -45,7 +51,7 @@ impl std::fmt::Display for TelegramError {
 
 #[async_trait]
 pub trait TelegramClient: Clone + Send + Sync + 'static {
-    async fn upload_file(&self, path: PathBuf, display_name: String) -> Result<(), String>;
+    async fn upload_file(&self, path: PathBuf, display_name: String) -> Result<(), UploadError>;
 }
 
 #[derive(Clone)]
@@ -148,7 +154,8 @@ impl TelegramGateway {
 
     pub async fn test_send(&self, message: &str) -> Result<(), TelegramError> {
         let config = self.configuration()?;
-        self.client
+        let response = self
+            .client
             .post(self.url(config.bot_token.expose_secret(), "sendMessage")?)
             .form(&[
                 ("chat_id", config.chat_id.to_string()),
@@ -158,15 +165,18 @@ impl TelegramGateway {
             .await
             .and_then(reqwest::Response::error_for_status)
             .map(|_| ())
-            .map_err(|_| TelegramError::RequestFailed)
+            .map_err(|_| TelegramError::RequestFailed);
+        response
     }
 
     pub async fn upload_file(
         &self,
         path: PathBuf,
         display_name: String,
-    ) -> Result<(), TelegramError> {
-        let config = self.configuration()?;
+    ) -> Result<(), UploadError> {
+        let config = self
+            .configuration()
+            .map_err(|_| UploadError::PreUploadRejected)?;
         let is_mp4 = path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -175,14 +185,14 @@ impl TelegramGateway {
         let method = if is_mp4 { "sendVideo" } else { "sendDocument" };
         let file = tokio::fs::File::open(&path)
             .await
-            .map_err(|_| TelegramError::RequestFailed)?;
+            .map_err(|_| UploadError::PreUploadRejected)?;
         let size = file
             .metadata()
             .await
-            .map_err(|_| TelegramError::RequestFailed)?
+            .map_err(|_| UploadError::PreUploadRejected)?
             .len();
         if size > MAX_FILE_SIZE_BYTES {
-            return Err(TelegramError::FileTooLarge);
+            return Err(UploadError::PreUploadRejected);
         }
         let part = Part::stream_with_length(
             reqwest::Body::wrap_stream(ReaderStream::new(file.take(size))),
@@ -193,14 +203,20 @@ impl TelegramGateway {
             .text("chat_id", config.chat_id.to_string())
             .part(field, part);
 
-        self.client
-            .post(self.url(config.bot_token.expose_secret(), method)?)
+        let response = self
+            .client
+            .post(
+                self.url(config.bot_token.expose_secret(), method)
+                    .map_err(|_| UploadError::PreUploadRejected)?,
+            )
             .multipart(form)
             .send()
             .await
-            .and_then(reqwest::Response::error_for_status)
-            .map(|_| ())
-            .map_err(|_| TelegramError::RequestFailed)
+            .map_err(|_| UploadError::TransportUncertain)?;
+        if !response.status().is_success() {
+            return Err(UploadError::TransportUncertain);
+        }
+        Ok(())
     }
 
     fn configuration(&self) -> Result<std::sync::Arc<TelegramConfig>, TelegramError> {
@@ -249,10 +265,8 @@ impl TelegramGateway {
 
 #[async_trait]
 impl TelegramClient for TelegramGateway {
-    async fn upload_file(&self, path: PathBuf, display_name: String) -> Result<(), String> {
-        self.upload_file(path, display_name)
-            .await
-            .map_err(|error| error.to_string())
+    async fn upload_file(&self, path: PathBuf, display_name: String) -> Result<(), UploadError> {
+        TelegramGateway::upload_file(self, path, display_name).await
     }
 }
 
