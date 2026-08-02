@@ -23,7 +23,7 @@ if(NOT EXISTS "${OBS_DEPENDENCIES_INCLUDE_DIR}/simde/x86/sse2.h")
   )
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Network Widgets)
 
 # OBS source distributions generate this header while building libobs. Plugin
 # builds against the matching source headers need the same small config shim.
@@ -36,7 +36,9 @@ configure_file(
 )
 
 add_library(obs-telegram-send MODULE
+  src/agent_client.cpp
   src/module.cpp
+  src/onboarding_dialog.cpp
   src/recording_controller.cpp
   src/send_confirmation_dialog.cpp
 )
@@ -48,6 +50,7 @@ target_include_directories(obs-telegram-send PRIVATE
   "${CMAKE_BINARY_DIR}/generated"
 )
 target_link_libraries(obs-telegram-send PRIVATE
+  Qt6::Network
   Qt6::Widgets
   "${OBS_FRAMEWORKS_DIR}/obs-frontend-api.dylib"
 )

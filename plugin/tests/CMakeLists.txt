@@ -9,7 +9,10 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
 add_executable(plugin-tests
+  agent_client_test.cpp
   recording_controller_test.cpp
+  ../src/agent_client.cpp
+  ../src/onboarding_dialog.cpp
   ../src/recording_controller.cpp
   ../src/send_confirmation_dialog.cpp
 )
@@ -21,7 +24,7 @@ target_include_directories(plugin-tests PRIVATE
   "${OBS_DEPENDENCIES_INCLUDE_DIR}"
   "${CMAKE_BINARY_DIR}/generated"
 )
-target_link_libraries(plugin-tests PRIVATE GTest::gtest Qt6::Widgets)
+target_link_libraries(plugin-tests PRIVATE GTest::gtest Qt6::Network Qt6::Widgets)
 
 include(GoogleTest)
 gtest_discover_tests(plugin-tests)

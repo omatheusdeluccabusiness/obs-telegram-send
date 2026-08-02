@@ -1,10 +1,14 @@
+#include "agent_client.hpp"
+#include "onboarding_dialog.hpp"
 #include "recording_controller.hpp"
 #include "send_confirmation_dialog.hpp"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 
+#include <QAction>
 #include <QFileInfo>
+#include <QPointer>
 #include <QWidget>
 
 #include <cmath>
@@ -17,8 +21,11 @@ OBS_MODULE_USE_DEFAULT_LOCALE("obs-telegram-send", "en-US")
 
 namespace {
 
-std::unique_ptr<SendConfirmationDialog> confirmation_dialog;
+QPointer<AgentClient> agent_client;
+QPointer<OnboardingDialog> onboarding_dialog;
+QPointer<SendConfirmationDialog> confirmation_dialog;
 std::unique_ptr<RecordingController> recording_controller;
+QPointer<QAction> tools_action;
 
 std::uint64_t completed_recording_duration_ms()
 {
@@ -53,7 +60,7 @@ std::optional<RecordingMetadata> resolve_completed_recording()
 	}
 
 	return RecordingMetadata{file.absoluteFilePath().toStdString(), file.fileName().toStdString(),
-				 completed_recording_duration_ms(), static_cast<std::uint64_t>(file.size())};
+	                         completed_recording_duration_ms(), static_cast<std::uint64_t>(file.size())};
 }
 
 void frontend_event(obs_frontend_event event, void *private_data)
@@ -66,17 +73,41 @@ void frontend_event(obs_frontend_event event, void *private_data)
 bool obs_module_load(void)
 {
 	auto *main_window = static_cast<QWidget *>(obs_frontend_get_main_window());
-	confirmation_dialog = std::make_unique<SendConfirmationDialog>(main_window);
+	auto client = AgentClient::from_system(main_window);
+	agent_client = client.release();
+	onboarding_dialog = new OnboardingDialog(*agent_client, main_window);
+	confirmation_dialog = new SendConfirmationDialog(agent_client, main_window);
 	recording_controller = std::make_unique<RecordingController>(
-		[](const std::string &, const std::string &) {
-			// Task 6 replaces this adapter with AgentClient::create_job.
-			blog(LOG_WARNING, "Telegram agent client is not connected");
-		},
-		resolve_completed_recording,
-		[](const RecordingMetadata &metadata) { confirmation_dialog->show_for(metadata); });
+	    [](const std::string &path, const std::string &display_name) {
+		    agent_client->create_job(
+		        QString::fromStdString(path), QString::fromStdString(display_name),
+		        [](CreatedJobResult result) {
+			        if (result.result.ok && result.job_id.isEmpty()) {
+				        result.result =
+				            AgentResult{false, QStringLiteral("invalid_response"),
+				                        QObject::tr("O serviço local retornou uma resposta inválida."),
+				                        result.result.http_status};
+			        }
+			        confirmation_dialog->show_job_created(std::move(result));
+		        });
+	    },
+	    resolve_completed_recording,
+	    [](const RecordingMetadata &metadata) {
+		    confirmation_dialog->set_agent_ready(false);
+		    confirmation_dialog->show_for(metadata);
+		    agent_client->probe(
+		        [](AgentResult) { confirmation_dialog->set_agent_ready(agent_client->is_ready()); });
+	    });
 	confirmation_dialog->set_send_confirmed_handler(
-		[](const RecordingMetadata &) { recording_controller->confirm_send(); });
+	    [](const RecordingMetadata &) { recording_controller->confirm_send(); });
 	obs_frontend_add_event_callback(frontend_event, recording_controller.get());
+	tools_action = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction("Telegram Send"));
+	QObject::connect(tools_action, &QAction::triggered, onboarding_dialog.get(), [] {
+		onboarding_dialog->start_over();
+		onboarding_dialog->show();
+		onboarding_dialog->raise();
+		onboarding_dialog->activateWindow();
+	});
 	return true;
 }
 
@@ -85,5 +116,8 @@ void obs_module_unload(void)
 	if (recording_controller)
 		obs_frontend_remove_event_callback(frontend_event, recording_controller.get());
 	recording_controller.reset();
-	confirmation_dialog.reset();
+	delete agent_client.data();
+	delete confirmation_dialog.data();
+	delete onboarding_dialog.data();
+	tools_action.clear();
 }
