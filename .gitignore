@@ -1,0 +1,6 @@
+.worktrees/
+.superpowers/
+build/
+dist/
+agent/target/
+.DS_Store
