@@ -32,11 +32,21 @@ impl From<ConfigInput> for TelegramConfig {
 }
 
 pub fn validate_config(input: ConfigInput) -> Result<TelegramConfig, ConfigError> {
-    if !input.bot_token.contains(':') {
+    let valid_bot_token = input
+        .bot_token
+        .split_once(':')
+        .is_some_and(|(identifier, suffix)| {
+            !identifier.is_empty()
+                && identifier.bytes().all(|byte| byte.is_ascii_digit())
+                && !suffix.is_empty()
+        });
+    if !valid_bot_token {
         return Err(ConfigError::InvalidBotToken);
     }
 
-    if input.api_id == 0 || input.api_hash.trim().is_empty() {
+    let valid_api_hash =
+        input.api_hash.len() == 32 && input.api_hash.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if input.api_id == 0 || input.chat_id == 0 || !valid_api_hash {
         return Err(ConfigError::InvalidTelegramApp);
     }
 

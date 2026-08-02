@@ -23,11 +23,45 @@ fn rejects_a_token_without_the_botfather_separator() {
 }
 
 #[test]
+fn rejects_a_bot_token_without_a_numeric_identifier() {
+    assert!(matches!(
+        validate_config(input(":abc", 12345)),
+        Err(ConfigError::InvalidBotToken)
+    ));
+}
+
+#[test]
+fn rejects_a_bot_token_without_a_suffix() {
+    assert!(matches!(
+        validate_config(input("123:", 12345)),
+        Err(ConfigError::InvalidBotToken)
+    ));
+}
+
+#[test]
 fn accepts_a_private_chat_identifier() {
     assert_eq!(
         validate_config(input("123:abc", 12345)).unwrap().chat_id,
         12345
     );
+}
+
+#[test]
+fn accepts_a_negative_group_chat_identifier() {
+    assert_eq!(
+        validate_config(input("123:abc", -10012345))
+            .unwrap()
+            .chat_id,
+        -10012345
+    );
+}
+
+#[test]
+fn rejects_a_zero_chat_identifier() {
+    assert!(matches!(
+        validate_config(input("123:abc", 0)),
+        Err(ConfigError::InvalidTelegramApp)
+    ));
 }
 
 #[test]
@@ -45,6 +79,28 @@ fn rejects_a_zero_telegram_api_identifier() {
 fn rejects_an_empty_telegram_api_hash() {
     let mut configuration = input("123:abc", 12345);
     configuration.api_hash = " \t ".to_owned();
+
+    assert!(matches!(
+        validate_config(configuration),
+        Err(ConfigError::InvalidTelegramApp)
+    ));
+}
+
+#[test]
+fn rejects_a_telegram_api_hash_with_non_hexadecimal_characters() {
+    let mut configuration = input("123:abc", 12345);
+    configuration.api_hash = "0123456789abcdef0123456789abcdeg".to_owned();
+
+    assert!(matches!(
+        validate_config(configuration),
+        Err(ConfigError::InvalidTelegramApp)
+    ));
+}
+
+#[test]
+fn rejects_a_telegram_api_hash_with_the_wrong_length() {
+    let mut configuration = input("123:abc", 12345);
+    configuration.api_hash = "0123456789abcdef0123456789abcde".to_owned();
 
     assert!(matches!(
         validate_config(configuration),
