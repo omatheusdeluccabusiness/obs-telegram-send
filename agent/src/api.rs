@@ -8,6 +8,7 @@ use axum::{
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -20,11 +21,19 @@ use crate::{
 
 type LocalJobs = JobService<TelegramGateway>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalBotApiStartState {
+    Stopped,
+    Starting,
+    Ready,
+}
+
 #[derive(Clone)]
 struct ApiState {
     gateway: TelegramGateway,
     jobs: LocalJobs,
     local_bot_api: Arc<Mutex<Option<LocalBotApiServer>>>,
+    local_bot_api_start: Arc<tokio::sync::Mutex<LocalBotApiStartState>>,
 }
 
 impl Default for ApiState {
@@ -36,6 +45,11 @@ impl Default for ApiState {
 
 impl ApiState {
     fn with_shared_server(local_bot_api: Arc<Mutex<Option<LocalBotApiServer>>>) -> Self {
+        let initial_start_state = if local_bot_api.lock().unwrap().is_some() {
+            LocalBotApiStartState::Ready
+        } else {
+            LocalBotApiStartState::Stopped
+        };
         let gateway = TelegramGateway::from_keychain_with_server(Arc::clone(&local_bot_api));
         let jobs = JobService::in_app_support(gateway.clone())
             .expect("agent must access its protected local upload-job store");
@@ -43,6 +57,7 @@ impl ApiState {
             gateway,
             jobs,
             local_bot_api,
+            local_bot_api_start: Arc::new(tokio::sync::Mutex::new(initial_start_state)),
         };
         debug_assert!(state.gateway.uses_server_handle(&state.local_bot_api));
         state
@@ -51,37 +66,20 @@ impl ApiState {
         &self,
         configuration: &crate::config::TelegramConfig,
     ) -> Result<(), TelegramError> {
-        if self.local_bot_api.lock().unwrap().is_some() {
-            return Ok(());
-        }
-        let candidate = LocalBotApiServer::start_after_cloud_logout(configuration, 0).await?;
-        let mut server = self.local_bot_api.lock().unwrap();
-        if server.is_none() {
-            *server = Some(candidate);
-        }
-        Ok(())
+        start_once(&self.local_bot_api_start, &self.local_bot_api, || {
+            LocalBotApiServer::start_after_cloud_logout(configuration, 0)
+        })
+        .await
     }
 
     async fn start_onboarding_bot_api(
         &self,
         credentials: &TelegramCredentials,
     ) -> Result<String, TelegramError> {
-        if self
-            .local_bot_api
-            .lock()
-            .map_err(|_| TelegramError::RequestFailed)?
-            .is_none()
-        {
-            let candidate =
-                LocalBotApiServer::start_onboarding_after_cloud_logout(credentials, 0).await?;
-            let mut server = self
-                .local_bot_api
-                .lock()
-                .map_err(|_| TelegramError::RequestFailed)?;
-            if server.is_none() {
-                *server = Some(candidate);
-            }
-        }
+        start_once(&self.local_bot_api_start, &self.local_bot_api, || {
+            LocalBotApiServer::start_onboarding_after_cloud_logout(credentials, 0)
+        })
+        .await?;
         let mut server = self
             .local_bot_api
             .lock()
@@ -89,6 +87,33 @@ impl ApiState {
         let server = server.as_mut().ok_or(TelegramError::RequestFailed)?;
         server.ensure_ready()?;
         Ok(server.endpoint())
+    }
+}
+
+async fn start_once<T, Start, StartFuture>(
+    start_state: &tokio::sync::Mutex<LocalBotApiStartState>,
+    server: &Mutex<Option<T>>,
+    start: Start,
+) -> Result<(), TelegramError>
+where
+    Start: FnOnce() -> StartFuture,
+    StartFuture: Future<Output = Result<T, TelegramError>>,
+{
+    let mut state = start_state.lock().await;
+    if *state == LocalBotApiStartState::Ready {
+        return Ok(());
+    }
+    *state = LocalBotApiStartState::Starting;
+    match start().await {
+        Ok(candidate) => {
+            *server.lock().map_err(|_| TelegramError::RequestFailed)? = Some(candidate);
+            *state = LocalBotApiStartState::Ready;
+            Ok(())
+        }
+        Err(error) => {
+            *state = LocalBotApiStartState::Stopped;
+            Err(error)
+        }
     }
 }
 
@@ -385,4 +410,43 @@ fn new_challenge() -> String {
     let mut bytes = [0_u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod concurrent_start_tests {
+    use super::{start_once, LocalBotApiStartState, TelegramError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn concurrent_requests_share_one_completed_start() {
+        let gate = Arc::new(tokio::sync::Mutex::new(LocalBotApiStartState::Stopped));
+        let server = Arc::new(Mutex::new(None));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+
+        for _ in 0..2 {
+            let gate = Arc::clone(&gate);
+            let server = Arc::clone(&server);
+            let starts = Arc::clone(&starts);
+            tasks.push(tokio::spawn(async move {
+                start_once(&gate, &server, || async move {
+                    starts.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    Ok::<_, TelegramError>("http://127.0.0.1:41723".to_owned())
+                })
+                .await
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(*gate.lock().await, LocalBotApiStartState::Ready);
+        assert_eq!(
+            server.lock().unwrap().as_deref(),
+            Some("http://127.0.0.1:41723")
+        );
+    }
 }

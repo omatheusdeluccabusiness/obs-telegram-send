@@ -264,7 +264,7 @@ async fn successful_cloud_logout_is_remembered_before_a_failed_local_start() {
 }
 
 #[tokio::test]
-async fn a_non_ok_cloud_response_still_allows_a_valid_local_start() {
+async fn a_non_ok_cloud_response_does_not_claim_migration_is_complete() {
     let app = Router::new().route(
         "/bot123:token/logOut",
         post(|| async { Json(json!({"ok": false, "description": "already logged out"})) }),
@@ -290,7 +290,7 @@ async fn a_non_ok_cloud_response_still_allows_a_valid_local_start() {
     .await
     .unwrap();
 
-    assert_eq!(std::fs::read_dir(markers.path()).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(markers.path()).unwrap().count(), 0);
 }
 
 #[tokio::test]

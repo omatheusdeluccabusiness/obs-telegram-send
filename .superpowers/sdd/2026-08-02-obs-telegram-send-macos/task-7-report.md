@@ -32,8 +32,9 @@
   API cloud do Telegram e persiste imediatamente um marcador privado `0600`
   cujo nome é somente o SHA-256 do token. Reinícios pulam o `logOut` já
   concluído; respostas cloud indisponíveis/não-ok ainda permitem tentar o
-  servidor local. O início só é aceito após `getMe` local com `ok: true`, então
-  token inválido não é silenciosamente aceito.
+  servidor local, mas nunca criam marcador e o próximo início tenta `logOut`
+  novamente. O início só é aceito após `getMe` local com `ok: true`, então token
+  inválido não é silenciosamente aceito.
 - Onboarding e troubleshooting PT-BR foram escritos para cliente leigo, com os
   quatro paths reais de screenshot que o controlador deve capturar. O release
   é bloqueado enquanto faltarem. O uninstall remove apenas os três alvos de
@@ -58,7 +59,7 @@
    com o fake em loopback.
 3. O teste do caminho empacotado inicialmente não compilou porque
    `packaged_executable_path` não existia; passa sem depender do `PATH`.
-4. `cargo test --manifest-path agent/Cargo.toml`: 42 testes passaram na rodada
+4. `cargo test --manifest-path agent/Cargo.toml`: 43 testes passaram na rodada
    completa final. `bash -n`, `plutil -lint` e `git diff --check` passaram.
 5. `cargo build --manifest-path agent/Cargo.toml --release` gerou o agente
    arm64 usado no pacote. O plugin arm64 já compilado em `build/` foi usado.
@@ -91,8 +92,13 @@
     reproduzindo `logOut` bem-sucedido + falha local + retry bem-sucedido e
     confirmou uma única chamada cloud, fingerprint hexadecimal de 64 caracteres,
     ausência do token no arquivo e modo `0600`. Outro teste confirma que
-    `getMe` local com `ok: false` é recusado; uma resposta cloud não-ok também
-    foi coberta e não impede uma inicialização local válida.
+    `getMe` local com `ok: false` é recusado; uma resposta cloud não-ok permite
+    a tentativa local, mas o teste confirma que ela não cria marcador.
+13. TDD da concorrência: o teste inicialmente não compilou porque `start_once`
+    não existia. Depois passou com duas tasks simultâneas, uma única execução de
+    migração/start e o mesmo endpoint publicado. `ApiState` mantém um mutex
+    assíncrono adquirido durante toda a checagem, start e publicação; nenhum
+    `std::sync::Mutex` permanece adquirido através de `await`.
 
 ## Self-review e preocupações reais
 

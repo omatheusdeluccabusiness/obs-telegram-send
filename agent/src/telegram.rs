@@ -626,9 +626,6 @@ where
     }
 
     let result = start_local_server().await;
-    if result.is_ok() {
-        write_migration_marker(&marker)?;
-    }
     result
 }
 
