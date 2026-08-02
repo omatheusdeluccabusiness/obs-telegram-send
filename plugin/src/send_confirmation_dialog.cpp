@@ -10,6 +10,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <utility>
 
 namespace {
@@ -50,6 +51,7 @@ SendConfirmationDialog::SendConfirmationDialog(AgentClient *agent, QWidget *pare
 	intro->setWordWrap(true);
 
 	name_label_ = new QLabel(this);
+	name_label_->setObjectName(QStringLiteral("recordingNameLabel"));
 	duration_label_ = new QLabel(this);
 	size_label_ = new QLabel(this);
 	name_label_->setTextFormat(Qt::PlainText);
@@ -108,10 +110,17 @@ SendConfirmationDialog::SendConfirmationDialog(AgentClient *agent, QWidget *pare
 	layout->addWidget(buttons);
 
 	connect(consent_check_box_, &QCheckBox::toggled, this, [this] { update_send_button(); });
-	connect(cancel_button, &QPushButton::clicked, this, &QDialog::reject);
+	connect(cancel_button, &QPushButton::clicked, this, [this] {
+		reject();
+		if (state_ != State::CreatingJob && state_ != State::TrackingJob) {
+			state_ = State::Idle;
+			display_next_confirmation();
+		}
+	});
 	connect(send_button_, &QPushButton::clicked, this, [this] {
-		if (!agent_ready_ || !consent_check_box_->isChecked())
+		if (state_ != State::AwaitingConsent || !agent_ready_ || !consent_check_box_->isChecked())
 			return;
+		state_ = State::CreatingJob;
 		send_button_->setEnabled(false);
 		consent_check_box_->setEnabled(false);
 		job_filename_label_->setText(QString::fromStdString(metadata_.display_name));
@@ -122,8 +131,9 @@ SendConfirmationDialog::SendConfirmationDialog(AgentClient *agent, QWidget *pare
 		job_progress_->setValue(0);
 		job_progress_->setVisible(true);
 		if (send_confirmed_) {
-			send_confirmed_(metadata_);
+			send_confirmed_(metadata_, active_confirmation_token_);
 		} else {
+			state_ = State::Terminal;
 			show_request_error(tr("O envio não pôde ser iniciado."));
 		}
 	});
@@ -133,7 +143,10 @@ SendConfirmationDialog::SendConfirmationDialog(AgentClient *agent, QWidget *pare
 			return;
 		retry_button_->setEnabled(false);
 		job_message_label_->setText(tr("Tentando novamente…"));
-		agent_->retry_job(current_job_id_, [this](JobStatusResult status) {
+		const QString requested_job_id = current_job_id_;
+		agent_->retry_job(requested_job_id, [this, requested_job_id](JobStatusResult status) {
+			if (requested_job_id != current_job_id_)
+				return;
 			retry_button_->setEnabled(true);
 			apply_job_status(std::move(status));
 		});
@@ -141,9 +154,23 @@ SendConfirmationDialog::SendConfirmationDialog(AgentClient *agent, QWidget *pare
 	set_agent_ready(false);
 }
 
-void SendConfirmationDialog::show_for(RecordingMetadata metadata)
+SendConfirmationDialog::ConfirmationToken SendConfirmationDialog::show_for(RecordingMetadata metadata)
 {
-	metadata_ = std::move(metadata);
+	PendingConfirmation confirmation{++next_confirmation_token_, std::move(metadata)};
+	const auto token = confirmation.token;
+	if (state_ == State::CreatingJob || state_ == State::TrackingJob) {
+		pending_confirmations_.push_back(std::move(confirmation));
+		return token;
+	}
+	display_confirmation(std::move(confirmation));
+	return token;
+}
+
+void SendConfirmationDialog::display_confirmation(PendingConfirmation confirmation)
+{
+	active_confirmation_token_ = confirmation.token;
+	metadata_ = std::move(confirmation.metadata);
+	state_ = State::AwaitingConsent;
 	name_label_->setText(QString::fromStdString(metadata_.display_name));
 	duration_label_->setText(format_duration(metadata_.duration_ms));
 	size_label_->setText(format_size(metadata_.size_bytes));
@@ -151,7 +178,9 @@ void SendConfirmationDialog::show_for(RecordingMetadata metadata)
 	consent_check_box_->setEnabled(agent_ready_);
 	current_job_id_.clear();
 	poll_in_flight_ = false;
+	consecutive_poll_failures_ = 0;
 	poll_timer_->stop();
+	poll_timer_->setInterval(500);
 	job_filename_label_->setVisible(false);
 	job_progress_->setVisible(false);
 	job_message_label_->setVisible(false);
@@ -160,13 +189,31 @@ void SendConfirmationDialog::show_for(RecordingMetadata metadata)
 	open();
 	raise();
 	activateWindow();
+
+	if (agent_) {
+		const auto token = active_confirmation_token_;
+		set_agent_ready(false);
+		agent_->probe([this, token](AgentResult) {
+			if (token == active_confirmation_token_ && state_ == State::AwaitingConsent)
+				set_agent_ready(agent_->is_ready());
+		});
+	}
+}
+
+void SendConfirmationDialog::display_next_confirmation()
+{
+	if (pending_confirmations_.empty())
+		return;
+	auto confirmation = std::move(pending_confirmations_.front());
+	pending_confirmations_.pop_front();
+	display_confirmation(std::move(confirmation));
 }
 
 void SendConfirmationDialog::set_agent_ready(bool ready)
 {
 	agent_ready_ = ready;
 	if (consent_check_box_)
-		consent_check_box_->setEnabled(ready && current_job_id_.isEmpty());
+		consent_check_box_->setEnabled(ready && state_ == State::AwaitingConsent);
 	if (readiness_label_) {
 		readiness_label_->setText(ready ? tr("Serviço local conectado e configuração confirmada.")
 		                                : tr("Envio indisponível. Clique em Não enviar; depois abra "
@@ -175,14 +222,21 @@ void SendConfirmationDialog::set_agent_ready(bool ready)
 	update_send_button();
 }
 
-void SendConfirmationDialog::show_job_created(CreatedJobResult result)
+void SendConfirmationDialog::show_job_created(ConfirmationToken token, CreatedJobResult result)
 {
+	if (token != active_confirmation_token_ || state_ != State::CreatingJob)
+		return;
 	if (!result.result.ok) {
+		state_ = State::Terminal;
 		show_request_error(result.result.message);
+		display_next_confirmation();
 		return;
 	}
+	state_ = State::TrackingJob;
 	current_job_id_ = result.job_id;
 	poll_in_flight_ = false;
+	consecutive_poll_failures_ = 0;
+	poll_timer_->setInterval(500);
 	job_message_label_->setText(tr("Envio colocado na fila…"));
 	job_message_label_->setVisible(true);
 	job_progress_->setRange(0, 100);
@@ -195,12 +249,27 @@ void SendConfirmationDialog::show_job_created(CreatedJobResult result)
 void SendConfirmationDialog::apply_job_status(JobStatusResult status)
 {
 	if (!status.result.ok) {
-		poll_timer_->stop();
-		show_request_error(status.result.message);
+		if (state_ != State::TrackingJob)
+			return;
+		if (is_terminal_poll_error(status.result)) {
+			state_ = State::Terminal;
+			poll_timer_->stop();
+			show_request_error(status.result.message);
+			return;
+		}
+		++consecutive_poll_failures_;
+		const int exponent = std::min(consecutive_poll_failures_, 4);
+		poll_timer_->setInterval(std::min(500 * (1 << exponent), 5000));
+		job_message_label_->setText(tr("Conexão temporariamente indisponível. Tentando novamente…"));
+		job_message_label_->setVisible(true);
+		if (!poll_timer_->isActive())
+			poll_timer_->start();
 		return;
 	}
 	if (status.job_id != current_job_id_)
 		return;
+	consecutive_poll_failures_ = 0;
+	poll_timer_->setInterval(500);
 	job_filename_label_->setText(status.filename);
 	job_filename_label_->setVisible(true);
 	job_progress_->setVisible(true);
@@ -233,18 +302,23 @@ void SendConfirmationDialog::apply_job_status(JobStatusResult status)
 
 	const bool active = status.state == QStringLiteral("queued") || status.state == QStringLiteral("uploading");
 	if (active) {
+		state_ = State::TrackingJob;
 		if (!poll_timer_->isActive())
 			poll_timer_->start();
 	} else {
+		state_ = State::Terminal;
 		poll_timer_->stop();
 	}
 	retry_button_->setVisible(status.retryable && status.state == QStringLiteral("failed"));
+	if (status.state == QStringLiteral("completed"))
+		display_next_confirmation();
 }
 
 void SendConfirmationDialog::update_send_button()
 {
 	if (send_button_)
-		send_button_->setEnabled(agent_ready_ && current_job_id_.isEmpty() && consent_check_box_->isChecked() &&
+		send_button_->setEnabled(state_ == State::AwaitingConsent && agent_ready_ && current_job_id_.isEmpty() &&
+		                         consent_check_box_->isChecked() &&
 		                         consent_check_box_->isEnabled());
 }
 
@@ -267,8 +341,15 @@ void SendConfirmationDialog::show_request_error(const QString &message)
 	poll_timer_->stop();
 	job_message_label_->setText(message.isEmpty() ? tr("O envio não pôde ser iniciado.") : message);
 	job_message_label_->setVisible(true);
-	consent_check_box_->setEnabled(agent_ready_ && current_job_id_.isEmpty());
+	consent_check_box_->setEnabled(agent_ready_ && state_ == State::AwaitingConsent);
 	update_send_button();
+}
+
+bool SendConfirmationDialog::is_terminal_poll_error(const AgentResult &result) const
+{
+	return result.code == QStringLiteral("invalid_response") || result.code == QStringLiteral("job_not_found") ||
+	       result.code == QStringLiteral("unauthorized") ||
+	       (result.http_status >= 400 && result.http_status < 500);
 }
 
 void SendConfirmationDialog::set_send_confirmed_handler(SendConfirmedHandler handler)

@@ -45,6 +45,19 @@ RecordingMetadata metadata(std::string filename, std::uint64_t size)
 	return RecordingMetadata{"/recordings/" + filename, std::move(filename), 0, size};
 }
 
+SendConfirmationDialog::ConfirmationToken begin_send(SendConfirmationDialog &dialog, RecordingMetadata recording)
+{
+	dialog.set_send_confirmed_handler([](const RecordingMetadata &, std::uint64_t) {});
+	const auto token = dialog.show_for(std::move(recording));
+	auto *consent = dialog.findChild<QCheckBox *>(QStringLiteral("sendConsentCheckBox"));
+	auto *send = dialog.findChild<QPushButton *>(QStringLiteral("sendNowButton"));
+	if (consent && send) {
+		consent->setChecked(true);
+		send->click();
+	}
+	return token;
+}
+
 TEST(RecordingController, DoesNotCreateUploadBeforeCheckboxConfirmation)
 {
 	FakeAgentClient agent;
@@ -133,7 +146,8 @@ TEST(SendConfirmationDialog, ConfirmsOnlyAfterCheckedSendButtonClick)
 	SendConfirmationDialog dialog(nullptr);
 	dialog.set_agent_ready(true);
 	int confirmations = 0;
-	dialog.set_send_confirmed_handler([&confirmations](const RecordingMetadata &) { ++confirmations; });
+	dialog.set_send_confirmed_handler(
+	    [&confirmations](const RecordingMetadata &, std::uint64_t) { ++confirmations; });
 	dialog.show_for(metadata("take.mp4", 300));
 	auto *consent = dialog.findChild<QCheckBox *>("sendConsentCheckBox");
 	auto *send = dialog.findChild<QPushButton *>("sendNowButton");
@@ -153,7 +167,7 @@ TEST(SendConfirmationDialog, StaysOpenToShowRealJobStateAfterConfirmation)
 	SendConfirmationDialog dialog(nullptr);
 	dialog.set_agent_ready(true);
 	bool visible_during_handler = false;
-	dialog.set_send_confirmed_handler([&dialog, &visible_during_handler](const RecordingMetadata &) {
+	dialog.set_send_confirmed_handler([&dialog, &visible_during_handler](const RecordingMetadata &, std::uint64_t) {
 		visible_during_handler = dialog.isVisible();
 	});
 	dialog.show_for(metadata("take.mp4", 300));
@@ -175,8 +189,9 @@ TEST(SendConfirmationDialog, PollsUploadingJobEvery500MillisecondsAndShowsSafeFi
 {
 	SendConfirmationDialog dialog(nullptr);
 	dialog.set_agent_ready(true);
-	dialog.show_for(metadata("take.mp4", 300));
+	const auto token = begin_send(dialog, metadata("take.mp4", 300));
 	dialog.show_job_created(
+	    token,
 	    CreatedJobResult{AgentResult{true, {}, {}, 201}, QStringLiteral("job-1"), QStringLiteral("queued")});
 	JobStatusResult status;
 	status.result = AgentResult{true, {}, {}, 200};
@@ -202,6 +217,134 @@ TEST(SendConfirmationDialog, PollsUploadingJobEvery500MillisecondsAndShowsSafeFi
 	EXPECT_EQ(progress->value(), 37);
 	EXPECT_EQ(message->text(), QStringLiteral("Enviando com segurança"));
 	EXPECT_EQ(message->textFormat(), Qt::PlainText);
+}
+
+TEST(SendConfirmationDialog, QueuesNewRecordingUntilActiveJobIsTerminal)
+{
+	SendConfirmationDialog dialog(nullptr);
+	dialog.set_agent_ready(true);
+	const auto first_token = begin_send(dialog, metadata("first.mp4", 300));
+	dialog.show_job_created(
+	    first_token,
+	    CreatedJobResult{AgentResult{true, {}, {}, 201}, QStringLiteral("job-first"), QStringLiteral("queued")});
+
+	JobStatusResult uploading;
+	uploading.result = AgentResult{true, {}, {}, 200};
+	uploading.job_id = QStringLiteral("job-first");
+	uploading.filename = QStringLiteral("first.mp4");
+	uploading.state = QStringLiteral("uploading");
+	dialog.apply_job_status(uploading);
+
+	const auto second_token = dialog.show_for(metadata("second.mkv", 400));
+	auto *name = dialog.findChild<QLabel *>(QStringLiteral("recordingNameLabel"));
+	auto *timer = dialog.findChild<QTimer *>(QStringLiteral("jobPollTimer"));
+	ASSERT_NE(name, nullptr);
+	ASSERT_NE(timer, nullptr);
+	EXPECT_NE(second_token, first_token);
+	EXPECT_EQ(name->text(), QStringLiteral("first.mp4"));
+	EXPECT_TRUE(timer->isActive());
+
+	JobStatusResult completed = uploading;
+	completed.state = QStringLiteral("completed");
+	completed.progress_percent = 100;
+	dialog.apply_job_status(completed);
+
+	EXPECT_EQ(name->text(), QStringLiteral("second.mkv"));
+	EXPECT_FALSE(timer->isActive());
+	EXPECT_FALSE(dialog.findChild<QCheckBox *>(QStringLiteral("sendConsentCheckBox"))->isChecked());
+}
+
+TEST(SendConfirmationDialog, IgnoresLateCreateResponseFromEarlierConfirmation)
+{
+	SendConfirmationDialog dialog(nullptr);
+	dialog.set_agent_ready(true);
+	std::uint64_t submitted_token = 0;
+	dialog.set_send_confirmed_handler(
+	    [&submitted_token](const RecordingMetadata &, std::uint64_t token) { submitted_token = token; });
+	const auto first_token = dialog.show_for(metadata("first.mp4", 300));
+	auto *consent = dialog.findChild<QCheckBox *>(QStringLiteral("sendConsentCheckBox"));
+	auto *send = dialog.findChild<QPushButton *>(QStringLiteral("sendNowButton"));
+	ASSERT_NE(consent, nullptr);
+	ASSERT_NE(send, nullptr);
+	consent->setChecked(true);
+	send->click();
+	ASSERT_EQ(submitted_token, first_token);
+
+	const auto second_token = dialog.show_for(metadata("second.mkv", 400));
+	ASSERT_NE(second_token, first_token);
+	auto *name = dialog.findChild<QLabel *>(QStringLiteral("recordingNameLabel"));
+	ASSERT_NE(name, nullptr);
+	EXPECT_EQ(name->text(), QStringLiteral("first.mp4"));
+
+	dialog.show_job_created(
+	    first_token,
+	    CreatedJobResult{AgentResult{false, QStringLiteral("invalid_job"), QStringLiteral("falhou"), 400}, {}, {}});
+	EXPECT_EQ(name->text(), QStringLiteral("second.mkv"));
+
+	dialog.show_job_created(
+	    first_token,
+	    CreatedJobResult{AgentResult{true, {}, {}, 201}, QStringLiteral("job-first"), QStringLiteral("queued")});
+
+	auto *job_filename = dialog.findChild<QLabel *>(QStringLiteral("jobFilenameLabel"));
+	auto *timer = dialog.findChild<QTimer *>(QStringLiteral("jobPollTimer"));
+	ASSERT_NE(name, nullptr);
+	ASSERT_NE(job_filename, nullptr);
+	ASSERT_NE(timer, nullptr);
+	EXPECT_EQ(name->text(), QStringLiteral("second.mkv"));
+	EXPECT_FALSE(job_filename->isVisible());
+	EXPECT_FALSE(timer->isActive());
+}
+
+TEST(SendConfirmationDialog, RetriesTransientPollingFailuresWithBoundedBackoff)
+{
+	SendConfirmationDialog dialog(nullptr);
+	dialog.set_agent_ready(true);
+	const auto token = begin_send(dialog, metadata("take.mp4", 300));
+	dialog.show_job_created(
+	    token,
+	    CreatedJobResult{AgentResult{true, {}, {}, 201}, QStringLiteral("job-1"), QStringLiteral("queued")});
+	auto *timer = dialog.findChild<QTimer *>(QStringLiteral("jobPollTimer"));
+	auto *message = dialog.findChild<QLabel *>(QStringLiteral("jobMessageLabel"));
+	ASSERT_NE(timer, nullptr);
+	ASSERT_NE(message, nullptr);
+
+	JobStatusResult transient;
+	transient.result = AgentResult{false, {}, QStringLiteral("O serviço local não respondeu."), 0};
+	dialog.apply_job_status(transient);
+	EXPECT_TRUE(timer->isActive());
+	EXPECT_EQ(timer->interval(), 1000);
+	EXPECT_TRUE(message->text().contains(QStringLiteral("Tentando novamente")));
+
+	dialog.apply_job_status(transient);
+	EXPECT_TRUE(timer->isActive());
+	EXPECT_EQ(timer->interval(), 2000);
+	for (int attempt = 0; attempt < 8; ++attempt)
+		dialog.apply_job_status(transient);
+	EXPECT_EQ(timer->interval(), 5000);
+
+	JobStatusResult uploading;
+	uploading.result = AgentResult{true, {}, {}, 200};
+	uploading.job_id = QStringLiteral("job-1");
+	uploading.filename = QStringLiteral("take.mp4");
+	uploading.state = QStringLiteral("uploading");
+	dialog.apply_job_status(uploading);
+	EXPECT_TRUE(timer->isActive());
+	EXPECT_EQ(timer->interval(), 500);
+
+	uploading.state = QStringLiteral("completed");
+	dialog.apply_job_status(uploading);
+	EXPECT_FALSE(timer->isActive());
+
+	const auto second_token = begin_send(dialog, metadata("take-2.mp4", 400));
+	dialog.show_job_created(
+	    second_token,
+	    CreatedJobResult{AgentResult{true, {}, {}, 201}, QStringLiteral("job-2"), QStringLiteral("queued")});
+	JobStatusResult invalid_protocol;
+	invalid_protocol.result = AgentResult{false, QStringLiteral("invalid_response"),
+	                                      QStringLiteral("Resposta inválida"), 200};
+	dialog.apply_job_status(invalid_protocol);
+	EXPECT_FALSE(timer->isActive());
+	EXPECT_EQ(message->text(), QStringLiteral("Resposta inválida"));
 }
 
 } // namespace

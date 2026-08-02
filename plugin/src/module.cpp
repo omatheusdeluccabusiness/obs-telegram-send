@@ -81,25 +81,25 @@ bool obs_module_load(void)
 	    [](const std::string &path, const std::string &display_name) {
 		    agent_client->create_job(
 		        QString::fromStdString(path), QString::fromStdString(display_name),
-		        [](CreatedJobResult result) {
+		        [](CreatedJobResult) {});
+	    },
+	    resolve_completed_recording,
+	    [](const RecordingMetadata &metadata) { confirmation_dialog->show_for(metadata); });
+	confirmation_dialog->set_send_confirmed_handler(
+	    [](const RecordingMetadata &metadata, SendConfirmationDialog::ConfirmationToken token) {
+		    agent_client->create_job(
+		        QString::fromStdString(metadata.path), QString::fromStdString(metadata.display_name),
+		        [token](CreatedJobResult result) {
 			        if (result.result.ok && result.job_id.isEmpty()) {
 				        result.result =
 				            AgentResult{false, QStringLiteral("invalid_response"),
 				                        QObject::tr("O serviço local retornou uma resposta inválida."),
 				                        result.result.http_status};
 			        }
-			        confirmation_dialog->show_job_created(std::move(result));
+			        if (confirmation_dialog)
+				        confirmation_dialog->show_job_created(token, std::move(result));
 		        });
-	    },
-	    resolve_completed_recording,
-	    [](const RecordingMetadata &metadata) {
-		    confirmation_dialog->set_agent_ready(false);
-		    confirmation_dialog->show_for(metadata);
-		    agent_client->probe(
-		        [](AgentResult) { confirmation_dialog->set_agent_ready(agent_client->is_ready()); });
 	    });
-	confirmation_dialog->set_send_confirmed_handler(
-	    [](const RecordingMetadata &) { recording_controller->confirm_send(); });
 	obs_frontend_add_event_callback(frontend_event, recording_controller.get());
 	tools_action = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction("Telegram Send"));
 	QObject::connect(tools_action, &QAction::triggered, onboarding_dialog.get(), [] {

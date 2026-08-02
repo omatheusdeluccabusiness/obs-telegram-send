@@ -4,12 +4,98 @@
 #include <gtest/gtest.h>
 
 #include <QAbstractButton>
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QEventLoop>
+#include <QJsonDocument>
 #include <QJsonObject>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QThread>
 #include <QWizardPage>
 
+#include <deque>
+#include <functional>
+#include <memory>
 #include <optional>
 
 namespace {
+
+struct HttpResponse
+{
+	int status;
+	QByteArray body;
+};
+
+class LoopbackHttpServer : public QObject
+{
+      public:
+	LoopbackHttpServer()
+	{
+		EXPECT_TRUE(server_.listen(QHostAddress::LocalHost, 0));
+		connect(&server_, &QTcpServer::newConnection, this, [this] {
+			while (auto *socket = server_.nextPendingConnection()) {
+				auto bytes = std::make_shared<QByteArray>();
+				connect(socket, &QTcpSocket::readyRead, this, [this, socket, bytes] {
+					bytes->append(socket->readAll());
+					const auto header_end = bytes->indexOf("\r\n\r\n");
+					if (header_end < 0)
+						return;
+					int content_length = 0;
+					for (const auto &line : bytes->left(header_end).split('\n')) {
+						const auto trimmed = line.trimmed();
+						if (trimmed.toLower().startsWith("content-length:"))
+							content_length = trimmed.mid(QByteArrayLiteral("content-length:").size()).trimmed().toInt();
+					}
+					if (bytes->size() < header_end + 4 + content_length)
+						return;
+					requests_.push_back(bytes->left(header_end + 4 + content_length));
+					ASSERT_FALSE(responses_.empty());
+					const auto response = responses_.front();
+					responses_.pop_front();
+					const auto reason = response.status >= 500 ? QByteArrayLiteral("Service Unavailable")
+					                                             : QByteArrayLiteral("OK");
+					QByteArray wire = QByteArrayLiteral("HTTP/1.1 ") + QByteArray::number(response.status) + ' ' + reason +
+					                  QByteArrayLiteral("\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ") +
+					                  QByteArray::number(response.body.size()) + QByteArrayLiteral("\r\n\r\n") + response.body;
+					socket->write(wire);
+					socket->disconnectFromHost();
+				});
+			}
+		});
+	}
+
+	QUrl base_url() const
+	{
+		return QUrl(QStringLiteral("http://127.0.0.1:%1").arg(server_.serverPort()));
+	}
+
+	void respond(int status, QByteArray body)
+	{
+		responses_.push_back(HttpResponse{status, std::move(body)});
+	}
+
+	const std::vector<QByteArray> &requests() const
+	{
+		return requests_;
+	}
+
+      private:
+	QTcpServer server_;
+	std::deque<HttpResponse> responses_;
+	std::vector<QByteArray> requests_;
+};
+
+bool wait_until(const std::function<bool()> &condition, int timeout_ms = 2000)
+{
+	QElapsedTimer elapsed;
+	elapsed.start();
+	while (!condition() && elapsed.elapsed() < timeout_ms) {
+		QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+		QThread::msleep(1);
+	}
+	return condition();
+}
 
 TEST(AgentClient, NeverIncludesBearerInVisibleError)
 {
@@ -70,6 +156,48 @@ TEST(AgentClient, ChangingConfigurationRevokesEarlierConfirmationUntilARealTestS
 	                   [](AgentResult) {});
 
 	EXPECT_FALSE(client.configuration_known());
+}
+
+TEST(AgentClient, RealLoopbackTransportPreservesRouteAuthBodyAndDecodesTransientRecovery)
+{
+	LoopbackHttpServer server;
+	server.respond(201, QByteArrayLiteral("{\"job_id\":\"job-7\",\"state\":\"queued\"}"));
+	server.respond(503, QByteArrayLiteral("{\"code\":\"storage_unavailable\"}"));
+	server.respond(200, QByteArrayLiteral("{\"job_id\":\"job-7\",\"filename\":\"take.mp4\","
+	                                     "\"state\":\"uploading\",\"progress_percent\":41}"));
+	AgentClient client(server.base_url(), QStringLiteral("loopback-secret"), true);
+
+	std::optional<CreatedJobResult> created;
+	client.create_job(QStringLiteral("/recordings/take.mp4"), QStringLiteral("take.mp4"),
+	                  [&created](CreatedJobResult result) { created = std::move(result); });
+	ASSERT_TRUE(wait_until([&created] { return created.has_value(); }));
+	ASSERT_TRUE(created->result.ok);
+	EXPECT_EQ(created->job_id, QStringLiteral("job-7"));
+
+	std::optional<JobStatusResult> unavailable;
+	client.get_job(QStringLiteral("job-7"),
+	               [&unavailable](JobStatusResult result) { unavailable = std::move(result); });
+	ASSERT_TRUE(wait_until([&unavailable] { return unavailable.has_value(); }));
+	EXPECT_FALSE(unavailable->result.ok);
+	EXPECT_EQ(unavailable->result.http_status, 503);
+	EXPECT_EQ(unavailable->result.code, QStringLiteral("storage_unavailable"));
+
+	std::optional<JobStatusResult> recovered;
+	client.get_job(QStringLiteral("job-7"), [&recovered](JobStatusResult result) { recovered = std::move(result); });
+	ASSERT_TRUE(wait_until([&recovered] { return recovered.has_value(); }));
+	ASSERT_TRUE(recovered->result.ok);
+	EXPECT_EQ(recovered->state, QStringLiteral("uploading"));
+	EXPECT_EQ(recovered->progress_percent, 41);
+
+	ASSERT_EQ(server.requests().size(), 3U);
+	EXPECT_TRUE(server.requests()[0].startsWith("POST /v1/jobs HTTP/1.1\r\n"));
+	EXPECT_TRUE(server.requests()[0].toLower().contains("authorization: bearer loopback-secret\r\n"));
+	const auto first_body = server.requests()[0].mid(server.requests()[0].indexOf("\r\n\r\n") + 4);
+	const auto payload = QJsonDocument::fromJson(first_body).object();
+	EXPECT_EQ(payload.value(QStringLiteral("recording_path")).toString(), QStringLiteral("/recordings/take.mp4"));
+	EXPECT_EQ(payload.value(QStringLiteral("display_name")).toString(), QStringLiteral("take.mp4"));
+	EXPECT_TRUE(server.requests()[1].startsWith("GET /v1/jobs/job-7 HTTP/1.1\r\n"));
+	EXPECT_TRUE(server.requests()[2].startsWith("GET /v1/jobs/job-7 HTTP/1.1\r\n"));
 }
 
 TEST(OnboardingDialog, UsesTheFourRequiredPortuguesePages)
