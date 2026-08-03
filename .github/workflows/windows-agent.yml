@@ -30,6 +30,15 @@ jobs:
           cargo clippy --manifest-path agent/Cargo.toml --all-targets -- -D warnings
           cargo build --manifest-path agent/Cargo.toml --release
 
+      - name: Build OBS plugin against pinned Windows dependencies
+        shell: pwsh
+        run: |
+          cmake -S . -B build-windows -G 'Visual Studio 17 2022' -A x64 -DBUILD_TESTING=OFF
+          cmake --build build-windows --config Release --parallel
+          if (-not (Test-Path 'build-windows/plugin/Release/obs-telegram-send.dll')) {
+            throw 'The Windows OBS plugin DLL was not created.'
+          }
+
       - name: Upload Windows agent candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
