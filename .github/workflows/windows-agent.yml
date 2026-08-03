@@ -4,12 +4,20 @@ on:
   pull_request:
     paths:
       - 'agent/**'
+      - 'plugin/**'
+      - 'cmake/windows/**'
+      - 'installer/windows/**'
+      - 'scripts/**'
       - '.github/workflows/windows-agent.yml'
   push:
     branches:
       - main
     paths:
       - 'agent/**'
+      - 'plugin/**'
+      - 'cmake/windows/**'
+      - 'installer/windows/**'
+      - 'scripts/**'
       - '.github/workflows/windows-agent.yml'
   workflow_dispatch:
 
@@ -39,10 +47,27 @@ jobs:
             throw 'The Windows OBS plugin DLL was not created.'
           }
 
-      - name: Upload Windows agent candidate
+      - name: Build pinned local Telegram Bot API server
+        shell: pwsh
+        run: |
+          ./scripts/build-telegram-bot-api-windows.ps1 `
+            -WorkDirectory "$env:RUNNER_TEMP\telegram-bot-api-build" `
+            -Output 'build-windows/telegram-bot-api.exe'
+
+      - name: Assemble and verify Codex installation bundle
+        shell: pwsh
+        run: |
+          ./scripts/build-windows-bundle.ps1 `
+            -Plugin 'build-windows/plugin/Release/obs-telegram-send.dll' `
+            -Agent 'agent/target/release/obs-telegram-agent.exe' `
+            -TelegramBotApi 'build-windows/telegram-bot-api.exe' `
+            -Output 'dist/OBS-Telegram-Send-Windows-x64-Codex.zip'
+          ./scripts/verify-windows-bundle.ps1 -Bundle 'dist/OBS-Telegram-Send-Windows-x64-Codex.zip'
+
+      - name: Upload Windows Codex bundle candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: obs-telegram-agent-windows-x64
-          path: agent/target/release/obs-telegram-agent.exe
+          name: OBS-Telegram-Send-Windows-x64-Codex
+          path: dist/OBS-Telegram-Send-Windows-x64-Codex.zip
           if-no-files-found: error
           retention-days: 14
