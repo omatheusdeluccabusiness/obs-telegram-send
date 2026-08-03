@@ -1,13 +1,14 @@
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::{self, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
 use directories_next::BaseDirs;
 use rand::RngCore;
 use secrecy::SecretString;
+
+use crate::private_fs::{ensure_private_directory, ensure_private_file, private_create_new};
 
 pub const APP_SUPPORT_DIRECTORY_NAME: &str = "OBS-Telegram-Send";
 pub const INSTALL_BEARER_FILE_NAME: &str = "loopback-install-bearer";
@@ -67,12 +68,7 @@ impl InstallBearerStore {
     fn create_bearer(&self, path: &Path) -> Result<SecretString, InstallBearerStoreError> {
         let bearer = generated_bearer();
         let temporary_path = self.temporary_path();
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary_path)
-        {
+        match private_create_new(&temporary_path) {
             Ok(mut file) => {
                 file.write_all(bearer.as_bytes())
                     .and_then(|()| file.sync_all())
@@ -110,14 +106,11 @@ impl InstallBearerStore {
 }
 
 fn ensure_owner_only_directory(path: &Path) -> Result<(), InstallBearerStoreError> {
-    fs::create_dir_all(path).map_err(|_| InstallBearerStoreError::Unavailable)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|_| InstallBearerStoreError::Unavailable)
+    ensure_private_directory(path).map_err(|_| InstallBearerStoreError::Unavailable)
 }
 
 fn ensure_owner_only_file(path: &Path) -> Result<(), InstallBearerStoreError> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|_| InstallBearerStoreError::Unavailable)
+    ensure_private_file(path).map_err(|_| InstallBearerStoreError::Unavailable)
 }
 
 fn valid_bearer(value: &str) -> bool {

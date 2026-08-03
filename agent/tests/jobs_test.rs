@@ -19,6 +19,7 @@ struct FailingGateway {
     uploads: Arc<Mutex<usize>>,
 }
 
+#[cfg(unix)]
 #[derive(Clone)]
 struct PersistBlockingGateway {
     directory: PathBuf,
@@ -50,6 +51,7 @@ impl TelegramClient for FailingGateway {
 }
 
 #[async_trait]
+#[cfg(unix)]
 impl TelegramClient for PersistBlockingGateway {
     async fn upload_file(&self, _path: PathBuf, _display_name: String) -> Result<(), UploadError> {
         std::fs::set_permissions(
@@ -164,6 +166,7 @@ async fn queued_jobs_restored_after_a_crash_become_manually_retryable_failures()
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn a_persist_failure_before_upload_leaves_a_pollable_failed_job_without_calling_telegram() {
     let directory = tempfile::tempdir().unwrap();
     let gateway = FakeGateway::default();
@@ -191,6 +194,7 @@ async fn a_persist_failure_before_upload_leaves_a_pollable_failed_job_without_ca
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn a_completion_persist_failure_marks_the_job_unknown_and_never_retryable() {
     let directory = tempfile::tempdir().unwrap();
     let service = JobService::at(
@@ -236,6 +240,7 @@ async fn an_uncertain_transport_result_is_unknown_and_never_offered_for_retry() 
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn retry_save_failure_rolls_back_to_the_failed_pollable_state() {
     let directory = tempfile::tempdir().unwrap();
     let service = JobService::at(FailingGateway::default(), directory.path()).unwrap();

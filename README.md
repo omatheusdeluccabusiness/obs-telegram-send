@@ -1,8 +1,19 @@
 # OBS Telegram Send
 
-Plugin para macOS que oferece o envio manual de uma gravação concluída do OBS
-para o seu próprio Telegram. Nenhuma gravação é enviada até que você marque
+Plugin para OBS que oferece o envio manual de uma gravação concluída para o
+seu próprio Telegram. Nenhuma gravação é enviada até que você marque
 **Enviar este vídeo ao Telegram** na janela exibida ao final da gravação.
+
+## Instalação para clientes
+
+No Windows 10/11 x64, use o [guia de instalação via Codex](docs/instalar-com-codex-pt-BR.md).
+Ele instala apenas no perfil do usuário, confere os hashes do pacote e abre o
+OBS para o onboarding. A primeira distribuição é uma **prévia para instalação
+via Codex**, pois não possui assinatura Microsoft.
+
+O pacote macOS assinado para clientes continua dependente de certificados Apple
+Developer. O código e a instalação local já funcionam no Mac de desenvolvimento,
+mas não há um instalador macOS público para clientes leigos neste momento.
 
 O pacote instala:
 

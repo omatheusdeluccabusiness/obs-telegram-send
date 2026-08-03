@@ -70,6 +70,7 @@ fn binary_accepts_loopback_and_rejects_a_non_loopback_address() {
     let mut agent = AgentProcess(
         Command::new(env!("CARGO_BIN_EXE_obs-telegram-agent"))
             .env("OBS_TELEGRAM_AGENT_PORT", port.to_string())
+            .env("OBS_TELEGRAM_AGENT_SKIP_AUTOSTART", "1")
             .spawn()
             .unwrap(),
     );

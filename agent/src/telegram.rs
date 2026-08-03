@@ -1,9 +1,7 @@
 use std::{
-    fs::{self, OpenOptions},
     future::Future,
     io::Write,
     net::{Ipv4Addr, SocketAddr, TcpStream},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command},
     time::Duration,
@@ -26,10 +24,12 @@ use crate::{
     install_bearer::APP_SUPPORT_DIRECTORY_NAME,
     jobs::MAX_FILE_SIZE_BYTES,
     keychain::SecretStore,
+    private_fs::{ensure_private_directory, private_create_truncate},
 };
 
 pub const DEFAULT_BOT_API_ENDPOINT: &str = "http://127.0.0.1:8081";
 pub const TELEGRAM_CLOUD_BOT_API_ENDPOINT: &str = "https://api.telegram.org";
+#[cfg(target_os = "macos")]
 pub const PACKAGED_BOT_API_PATH: &str =
     "/Library/Application Support/OBS-Telegram-Send/telegram-bot-api";
 const BOT_API_DATA_DIRECTORY_NAME: &str = "telegram-bot-api-data";
@@ -311,7 +311,22 @@ impl LocalBotApiServer {
     }
 
     pub fn packaged_executable_path() -> PathBuf {
-        PathBuf::from(PACKAGED_BOT_API_PATH)
+        #[cfg(target_os = "macos")]
+        {
+            PathBuf::from(PACKAGED_BOT_API_PATH)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("telegram-bot-api.exe")
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            PathBuf::from("telegram-bot-api")
+        }
     }
 
     pub fn prepare_directories_at(
@@ -322,10 +337,8 @@ impl LocalBotApiServer {
         // so a regular executable file never collides with this directory.
         let data = application_support.join(BOT_API_DATA_DIRECTORY_NAME);
         let temporary = data.join("temp");
-        fs::create_dir_all(&temporary).map_err(|_| TelegramError::RequestFailed)?;
         for directory in [application_support, data.as_path(), temporary.as_path()] {
-            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
-                .map_err(|_| TelegramError::RequestFailed)?;
+            ensure_private_directory(directory).map_err(|_| TelegramError::RequestFailed)?;
         }
         Ok(BotApiDirectories { data, temporary })
     }
@@ -513,20 +526,23 @@ impl LocalBotApiServer {
             Duration::from_millis(100),
         )
         .map_err(|_| TelegramError::RequestFailed)?;
-        let output = Command::new("lsof")
-            .arg("-nP")
-            .arg(format!("-iTCP:{}", self.port))
-            .arg("-sTCP:LISTEN")
-            .arg("-Fp")
-            .output()
-            .map_err(|_| TelegramError::RequestFailed)?;
-        if !output.status.success()
-            || !Self::listener_is_owned_by(
-                self.child.id(),
-                &String::from_utf8_lossy(&output.stdout),
-            )
+        #[cfg(unix)]
         {
-            return Err(TelegramError::RequestFailed);
+            let output = Command::new("lsof")
+                .arg("-nP")
+                .arg(format!("-iTCP:{}", self.port))
+                .arg("-sTCP:LISTEN")
+                .arg("-Fp")
+                .output()
+                .map_err(|_| TelegramError::RequestFailed)?;
+            if !output.status.success()
+                || !Self::listener_is_owned_by(
+                    self.child.id(),
+                    &String::from_utf8_lossy(&output.stdout),
+                )
+            {
+                return Err(TelegramError::RequestFailed);
+            }
         }
         Ok(())
     }
@@ -624,9 +640,7 @@ where
     Start: FnOnce() -> StartFuture,
     StartFuture: Future<Output = Result<T, TelegramError>>,
 {
-    fs::create_dir_all(marker_directory).map_err(|_| TelegramError::RequestFailed)?;
-    fs::set_permissions(marker_directory, fs::Permissions::from_mode(0o700))
-        .map_err(|_| TelegramError::RequestFailed)?;
+    ensure_private_directory(marker_directory).map_err(|_| TelegramError::RequestFailed)?;
     let marker = marker_directory.join(token_fingerprint(bot_token));
     if marker.is_file() {
         return start_local_server().await;
@@ -679,18 +693,11 @@ fn token_fingerprint(bot_token: &secrecy::SecretString) -> String {
 }
 
 fn write_migration_marker(path: &Path) -> Result<(), TelegramError> {
-    let mut marker = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|_| TelegramError::RequestFailed)?;
+    let mut marker = private_create_truncate(path).map_err(|_| TelegramError::RequestFailed)?;
     marker
         .write_all(b"cloud-logout-completed\n")
         .map_err(|_| TelegramError::RequestFailed)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|_| TelegramError::RequestFailed)
+    Ok(())
 }
 
 impl Drop for LocalBotApiServer {

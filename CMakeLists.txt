@@ -2,11 +2,15 @@ cmake_minimum_required(VERSION 3.28)
 
 project(obs-telegram-send VERSION 0.1.0 LANGUAGES CXX)
 
-set(OBS_APP_BUNDLE "/Applications/OBS.app" CACHE PATH "Path to OBS Studio.app")
+set(OBS_APP_BUNDLE "/Applications/OBS.app" CACHE PATH "Path to OBS Studio.app (macOS only)")
 set(OBS_INCLUDE_DIR "" CACHE PATH "Directory containing OBS 32.1.1 obs-module.h")
 
-if(NOT EXISTS "${OBS_APP_BUNDLE}/Contents/Frameworks/libobs.framework")
+if(APPLE AND NOT EXISTS "${OBS_APP_BUNDLE}/Contents/Frameworks/libobs.framework")
   message(FATAL_ERROR "OBS_APP_BUNDLE must point to an OBS Studio.app bundle")
+endif()
+
+if(WIN32)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows/setup_obs.cmake")
 endif()
 
 if(NOT OBS_INCLUDE_DIR)
@@ -30,10 +34,18 @@ endif()
 include(CTest)
 add_subdirectory(plugin)
 
-# This is the exact destination consumed by the macOS installer payload.
-set(OBS_TELEGRAM_PLUGIN_INSTALL_DIR
-    "Library/Application Support/obs-studio/plugins"
-    CACHE PATH "System OBS plugin directory used by the macOS package")
+if(APPLE)
+  set(OBS_TELEGRAM_PLUGIN_INSTALL_DIR
+      "Library/Application Support/obs-studio/plugins"
+      CACHE PATH "System OBS plugin directory used by the macOS package")
+elseif(WIN32)
+  set(OBS_TELEGRAM_PLUGIN_INSTALL_DIR
+      "obs-telegram-send/bin/64bit"
+      CACHE PATH "Relative user plugin directory used by the Windows package")
+else()
+  message(FATAL_ERROR "OBS Telegram Send currently supports macOS and Windows only")
+endif()
 install(TARGETS obs-telegram-send
   BUNDLE DESTINATION "${OBS_TELEGRAM_PLUGIN_INSTALL_DIR}"
-  LIBRARY DESTINATION "${OBS_TELEGRAM_PLUGIN_INSTALL_DIR}")
+  LIBRARY DESTINATION "${OBS_TELEGRAM_PLUGIN_INSTALL_DIR}"
+  RUNTIME DESTINATION "${OBS_TELEGRAM_PLUGIN_INSTALL_DIR}")

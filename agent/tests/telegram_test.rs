@@ -9,6 +9,7 @@ use obs_telegram_agent::{
     telegram::{migrate_bot_to_local_at, LocalBotApiServer, TelegramGateway},
 };
 use serde_json::{json, Value};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tokio::net::TcpListener;
 
@@ -109,6 +110,7 @@ fn local_bot_api_directories_are_private_and_user_writable() {
         directories.temp_dir(),
     ] {
         assert!(directory.is_dir());
+        #[cfg(unix)]
         assert_eq!(
             std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
             0o700
@@ -135,10 +137,15 @@ fn local_bot_api_data_directory_does_not_collide_with_packaged_executable() {
 
 #[test]
 fn packaged_server_path_does_not_depend_on_the_shell_path() {
+    #[cfg(target_os = "macos")]
     assert_eq!(
         LocalBotApiServer::packaged_executable_path(),
         std::path::Path::new("/Library/Application Support/OBS-Telegram-Send/telegram-bot-api")
     );
+    #[cfg(target_os = "windows")]
+    assert!(LocalBotApiServer::packaged_executable_path()
+        .file_name()
+        .is_some_and(|name| name == "telegram-bot-api.exe"));
 }
 
 #[tokio::test]
@@ -270,6 +277,7 @@ async fn successful_cloud_logout_is_remembered_before_a_failed_local_start() {
             .unwrap()
             .contains("123:token")
     );
+    #[cfg(unix)]
     assert_eq!(
         std::fs::metadata(markers.path().join(&marker_names[0]))
             .unwrap()

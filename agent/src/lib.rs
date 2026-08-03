@@ -6,6 +6,7 @@ pub mod config;
 pub mod install_bearer;
 pub mod jobs;
 pub mod keychain;
+pub mod private_fs;
 pub mod telegram;
 
 pub fn app_with_secret(install_secret: &str) -> Router {

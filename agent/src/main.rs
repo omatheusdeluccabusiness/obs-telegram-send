@@ -23,9 +23,13 @@ async fn main() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, listener_port()))
         .await
         .expect("agent must bind to the local loopback interface");
-    let local_bot_api = LocalBotApiServer::start_if_configured(0)
-        .await
-        .expect("agent must load its protected Telegram configuration");
+    let local_bot_api = if std::env::var_os("OBS_TELEGRAM_AGENT_SKIP_AUTOSTART").is_some() {
+        None
+    } else {
+        LocalBotApiServer::start_if_configured(0)
+            .await
+            .expect("agent must load its protected Telegram configuration")
+    };
     axum::serve(
         listener,
         obs_telegram_agent::app_with_local_bot_api(install_bearer.expose_secret(), local_bot_api),
