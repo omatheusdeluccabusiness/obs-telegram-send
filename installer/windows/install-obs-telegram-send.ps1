@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [Parameter()]
-  [string]$BundleRoot = (Split-Path -Parent $PSScriptRoot)
+  [string]$BundleRoot = $PSScriptRoot
 )
 
 $ErrorActionPreference = 'Stop'
