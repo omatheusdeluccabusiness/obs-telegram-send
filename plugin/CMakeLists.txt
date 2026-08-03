@@ -25,7 +25,9 @@ if(NOT EXISTS "${OBS_DEPENDENCIES_INCLUDE_DIR}/simde/x86/sse2.h")
   )
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Network Widgets)
+if(NOT WIN32)
+  find_package(Qt6 REQUIRED COMPONENTS Network Widgets)
+endif()
 
 # OBS source distributions generate this header while building libobs. Plugin
 # builds against the matching source headers need the same small config shim.
@@ -64,8 +66,8 @@ if(APPLE)
   )
 elseif(WIN32)
   target_link_libraries(obs-telegram-send PRIVATE
-    "${OBS_WINDOWS_LIBOBS_LIBRARY}"
-    "${OBS_WINDOWS_FRONTEND_LIBRARY}"
+    OBS::libobs
+    OBS::obs-frontend-api
   )
 else()
   message(FATAL_ERROR "Unsupported platform")
